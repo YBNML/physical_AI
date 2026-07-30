@@ -1,356 +1,360 @@
-# Empirical Plan: Does the A/B Split Actually Beat a Monolith on *Your* Setup?
+# 실험 계획: A/B 분리가 *당신의* 환경에서 정말 monolith를 이기는가?
 
-**Bottom line up front.** Your hypothesis is really four hypotheses wearing one coat, and they have wildly different prior support. Separate them before spending a day of compute, because three of them are cheap to test and one of them is the only one you're actually claiming.
+*(원문 영어 · 국문 번역본. 이 문서는 Galbot G1·RTX 3090 확정 **이전**에 작성됐습니다. 실험 설계와 판정 규칙은 그대로 유효하지만, 하드웨어 관련 서술(SO-101 구매, Mac 연산 예산 등)은 REV.2/REV.3이 대체합니다 — E0/E1은 이제 3090에서 돌리면 되고, 실기체는 G1입니다.)*
 
-| # | Hypothesis | Prior evidence | Cost to test |
+**결론부터.** 당신의 가설은 사실 코트 하나를 걸친 네 개의 가설이고, 각각의 사전 근거가 극단적으로 다릅니다. 연산에 하루라도 쓰기 전에 이들을 분리하십시오 — 셋은 검증이 싸고, 하나가 당신이 실제로 주장하고 있는 유일한 것입니다.
+
+| # | 가설 | 사전 근거 | 검증 비용 |
 |---|---|---|---|
-| **H1 — Capacity** | At fixed total params, data, init, and command rate, two specialized models beat one. | **Negative.** HiRT real quasi-static: 70.0 split vs 71.3 mono. Orchestration study short-horizon: 69.57 vs 69.63 (tie). MoE scaling laws: routing gains diminish with scale, reasoning saturates. **No paper runs this controlled experiment.** | Days (E0), weeks (E1) |
-| **H2 — Latency** | The split raises achievable command rate. | **Confounded.** SmolVLA got equal success, ~30% faster completion, 2× throughput from async chunking on *one* model. OpenVLA-OFT: 26× faster on a 7B monolith, no split. On a single Mac GPU the two models *serialize*. | 1 week (E3), measured |
-| **H3 — Data provenance** | The split lets the high level eat cheap non-teleop data the low level can't. | **Strongly positive.** RT-Affordance predictor: 77% → 24% without ~750 hand-annotated images, → 11% without web co-training. HAMSTER: 1.2M off-domain high-level samples vs 320 in-domain low-level episodes. | 2 weeks (E2c) |
-| **H4 — Inspectability** | A pose interface is debuggable, unit-testable, human-correctable. | **Positive and underrated.** RT-H's largest single number was human correction (40% → 63%), not the hierarchy (+15%). | ~Free, falls out of E1 |
+| **H1 — 용량** | 총 파라미터·데이터·초기화·명령 rate를 고정하면, 특화 모델 2개가 1개를 이긴다 | **부정적.** HiRT 실기체 준정적: 분리 70.0 vs 단일 71.3. 오케스트레이션 연구 단기: 69.57 vs 69.63 (동률). MoE scaling law: routing 이득은 규모에 따라 감소, reasoning은 포화. **이 통제 실험을 돌린 논문이 없습니다** | 며칠 (E0), 몇 주 (E1) |
+| **H2 — Latency** | 분리가 달성 가능한 명령 rate를 올린다 | **교란됨.** SmolVLA는 *단일* 모델의 async chunking으로 동일 성공률 + 완료 ~30% 단축 + 처리량 2배를 얻었습니다. OpenVLA-OFT: 분리 없이 7B monolith를 26배 가속. 단일 Mac GPU에서 두 모델은 *직렬화*됩니다 | 1주 (E3), 측정 |
+| **H3 — 데이터 출처** | 분리 덕에 상위가, 하위는 먹을 수 없는 값싼 비텔레옵 데이터를 먹을 수 있다 | **강하게 긍정적.** RT-Affordance 예측기: 손 주석 이미지 ~750장 없으면 77% → 24%, 웹 공동학습 없으면 → 11%. HAMSTER: 상위는 off-domain 샘플 120만 개 vs 하위는 in-domain 에피소드 320개 | 2주 (E2c) |
+| **H4 — 검사 가능성** | 포즈 인터페이스는 디버깅·유닛테스트·사람 교정이 가능하다 | **긍정적이고 과소평가됨.** RT-H의 최대 단일 수치는 계층(+15%)이 아니라 사람 교정(40% → 63%)이었습니다 | ~무료, E1에서 부산물로 나옴 |
 
-**H1 is what you stated. H1 is the one nobody has ever demonstrated.** The plan below is designed to kill H1 in under a week if it's false, and to route you to H3/H4 (which are probably true and probably worth more) if it is.
-
----
-
-## Pre-flight (hours, not days) — do these before any training
-
-**P1. Hardware capability gate (30 min).** Determine what your arm's command interface actually accepts.
-- Joint position only (SO-100/SO-101, Koch, most hobby arms): **the compliance justification for Model B is void.** A learned Model B has exactly the expressive power of IK + a position servo on contact tasks. Scope your target tasks to free-space pick/place/reach in writing, now.
-- Torque / Cartesian impedance / variable stiffness (Franka FCI 1 kHz, KUKA FRI, UR force mode): the contact justification is testable, and you must add a stiffness channel to the interface.
-- Record the answer. It gates E4/E5 task selection.
-
-**P2. Concurrency measurement on the actual box (2 hours).** Run two processes: one ViT-B/16-class encoder in a tight loop, one 500M–1B model in a tight loop. Log p50/p95/p99/max for both, solo and concurrent. On an M4-base, the reference measurement is: ViT-B/16 fp16 batch-1 = **62.75 ms p50 solo → 214.29 ms p50 / 288.91 ms p99 under contention** (4.7 Hz). If your numbers look like that, **H2 is dead on this hardware before you write a line of model code**, and Model B must lose its RGB input or move to CoreML/ANE.
-
-**P3. Camera rate ceiling (5 min).** Model B's visual reactivity is capped at camera frame rate. A 30 fps camera = 33 ms floor. "200 Hz cerebellum on RGB" cannot exist. Write down the number.
-
-**P4. Calibration error budget (half day).** Measure hand-eye extrinsic error on your rig (AprilTag grid, AX=XB). Typical is ~2.1 mm RMS / ~3.2°. Any task with tolerance below ~2× that number cannot be done with an *absolute* pose interface, full stop, regardless of model quality.
+**H1이 당신이 명시한 것입니다. 그리고 H1이 아무도 시연한 적 없는 것입니다.** 아래 계획은 H1이 거짓이면 일주일 안에 죽이고, 그렇다면 (아마 참이고 아마 더 가치 있는) H3/H4로 당신을 보내도록 설계돼 있습니다.
 
 ---
 
-## E0 — THE CHEAPEST POSSIBLE FALSIFICATION
-**3–5 days · laptop · simulation · zero new teleop · 3 training runs**
+## 사전 점검 (며칠이 아니라 몇 시간) — 어떤 학습보다 먼저
 
-### The experiment
+**P1. 하드웨어 능력 게이트 (30분).** 팔의 명령 인터페이스가 실제로 무엇을 받는지 확정하십시오.
+- 관절 위치 전용 (SO-100/SO-101, Koch, 대부분의 취미용 팔): **Model B의 compliance 정당화가 무효입니다.** 접촉 작업에서 학습된 Model B는 IK + 위치 서보와 정확히 같은 표현력을 갖습니다. 목표 작업을 자유공간 pick/place/reach로 **서면으로, 지금** 한정하십시오.
+- 토크 / Cartesian impedance / 가변 강성 (Franka FCI 1kHz, KUKA FRI, UR force mode): 접촉 정당화가 검증 가능해지고, 인터페이스에 stiffness 채널을 추가해야 합니다.
+- 답을 기록하십시오. E4/E5 작업 선정을 게이팅합니다. *(참고: 이후 REV.2에서 G1은 위치 전용으로 확정)*
 
-**Train a low-level policy on the *oracle* interface and see whether it beats a monolith.** The oracle interface is the hindsight-labeled ground-truth future EE pose, extracted for free from the demonstration data. This is an **upper bound on the entire architecture**: no Model A you ever build can be better than ground truth.
+**P2. 실제 기기에서의 동시성 측정 (2시간).** 프로세스 2개를 돌리십시오: ViT-B/16급 인코더 tight loop 하나, 500M–1B 모델 tight loop 하나. 단독과 동시 각각 p50/p95/p99/max를 로깅합니다. M4-base 기준 참조 측정: ViT-B/16 fp16 batch-1 = **단독 62.75ms p50 → 경합 시 214.29ms p50 / 288.91ms p99** (4.7Hz). 당신 수치가 이렇게 나오면 **모델 코드 한 줄 쓰기 전에 이 하드웨어에서 H2가 죽은 것**이고, Model B는 RGB 입력을 잃거나 CoreML/ANE로 옮겨야 합니다. *(참고: 이후 재검증에서 이것이 MPS placement 아티팩트였음이 확인됨 — CPU에 두면 59.5Hz p50)*
 
-**Venue:** LIBERO-Spatial (10 tasks) + LIBERO-Object (10 tasks). Built on robosuite/MuJoCo, runs on macOS CPU, ships 50 demos/task = **1,000 demos, all provided**. Chosen because (a) zero data collection, (b) EE pose is in the state vector so hindsight labels are a `numpy` slice, (c) robosuite lets you swap `OSC_POSE` ↔ `JOINT_POSITION` controllers with a config flag, which gives you the IK ablation for free.
+**P3. 카메라 rate 상한 (5분).** Model B의 시각 반응성은 카메라 프레임 rate가 상한입니다. 30fps 카메라 = 33ms 바닥. **"RGB 위의 200Hz 소뇌"는 존재할 수 없습니다.** 숫자를 적어두십시오.
 
-**Three arms, ~25M params each, 3 seeds each:**
+**P4. 캘리브레이션 오차 예산 (반나절).** 리그의 hand-eye extrinsic 오차를 측정하십시오(AprilTag 그리드, AX=XB). 전형값 ~2.1mm RMS / ~3.2°. **공차가 그 수치의 ~2배 미만인 작업은 *절대* 포즈 인터페이스로는 불가능합니다.** 모델 품질과 무관하게, 예외 없이.
 
-| Arm | Definition |
+---
+
+## E0 — 가능한 가장 값싼 반증
+**3–5일 · 노트북 · 시뮬레이션 · 새 텔레옵 0 · 학습 런 3회**
+
+### 실험
+
+**저수준 정책을 *oracle* 인터페이스로 학습시켜 monolith를 이기는지 보십시오.** oracle 인터페이스란 데모 데이터에서 공짜로 추출되는, hindsight 라벨링된 정답 미래 EE 포즈입니다. 이것은 **아키텍처 전체의 상한**입니다: 앞으로 만들 어떤 Model A도 정답보다 좋을 수 없습니다.
+
+**장소:** LIBERO-Spatial (10작업) + LIBERO-Object (10작업). robosuite/MuJoCo 기반, macOS CPU에서 실행되고, 작업당 데모 50개 = **1,000개 전부 동봉.** 선정 이유: (a) 데이터 수집 0, (b) EE 포즈가 상태 벡터에 있어 hindsight 라벨이 `numpy` 슬라이스 한 줄, (c) robosuite가 config 플래그로 `OSC_POSE` ↔ `JOINT_POSITION` 컨트롤러를 바꿔줘서 IK ablation이 공짜.
+
+**3개 arm, 각 ~25M 파라미터, 각 3 seed:**
+
+| Arm | 정의 |
 |---|---|
-| **C0 — MONO** | One net: RGB (2 views) + proprio → action chunk. 25M params. |
-| **C6 — SPLIT-ORACLE** | Low-level net only: hindsight GT target EE pose (t+k) + joints + RGB → action chunk. Params ≤ 25M. Model A does not exist. |
-| **C8 — ORACLE-IK** | Hindsight GT target EE pose → robosuite `OSC_POSE` controller. **Zero learned parameters.** |
+| **C0 — MONO** | 네트워크 1개: RGB(2뷰) + proprio → action chunk. 25M |
+| **C6 — SPLIT-ORACLE** | 저수준 네트워크만: hindsight 정답 목표 EE 포즈(t+k) + 관절 + RGB → action chunk. ≤25M. Model A는 존재하지 않음 |
+| **C8 — ORACLE-IK** | hindsight 정답 목표 EE 포즈 → robosuite `OSC_POSE` 컨트롤러. **학습 파라미터 0개** |
 
-Hold constant: dataset, augmentation, optimizer, schedule, action representation, chunk horizon H=16, evaluation seeds, initial-state distribution.
+고정할 것: 데이터셋, augmentation, optimizer, 스케줄, 행동 표현, chunk horizon H=16, 평가 seed, 초기 상태 분포.
 
-**Evaluation:** 25 episodes × 20 tasks = **500 episodes per arm per seed**, 1,500 per arm total. At n=500, minimum detectable difference at 80% power ≈ **8.9 points** (two-proportion, p≈0.5). At n=1,500, ≈ **5.1 points**.
+**평가:** 에피소드 25 × 작업 20 = **arm·seed당 500 에피소드**, arm당 총 1,500. n=500에서 80% 검정력의 최소 탐지 차이 ≈ **8.9포인트** (two-proportion, p≈0.5). n=1,500에서 ≈ **5.1포인트.**
 
-**Laptop feasibility:** MuJoCo offscreen render at 224×224 on an M4 runs a 300-step LIBERO episode in ~5–10 s. 1,500 episodes ≈ 2–4 h per arm, overnight. Training 25M on 1,000 demos on M4 GPU: ~8–16 h per arm. Total ≈ 4 days wall-clock if you pipeline.
+**노트북 실행 가능성:** M4에서 224×224 MuJoCo offscreen 렌더 기준 300스텝 LIBERO 에피소드가 ~5–10초. 1,500 에피소드 ≈ arm당 2–4시간, 밤새 가능. 1,000개 데모로 25M 학습(M4 GPU): arm당 ~8–16시간. 파이프라인하면 총 ≈ 4일. *(3090에서는 이보다 훨씬 짧습니다)*
 
-### Decision rules
+### 판정 규칙
 
-**KILL H1 (stop, pivot to H3/H4) if:**
+**H1 사망 (중단, H3/H4로 전환) 조건:**
 ```
-C6 − C0  ≤  +5 points,  or the 95% CI of (C6 − C0) contains 0
+C6 − C0  ≤  +5포인트,  또는 (C6 − C0)의 95% CI가 0을 포함
 ```
-Rationale: C6 has *privileged hindsight information* that no deployed system has. GHOST measured oracle-vs-deployed at **90% vs 36.7%** (−53 pts); RT-Affordance at **76% vs 68%** (−8 pts). If your ceiling is only +5 over the monolith, Model A's real prediction error will put the deployed split *below* the monolith with certainty. There is nothing to build.
+근거: C6는 어떤 배포 시스템도 갖지 못하는 *특권적 hindsight 정보*를 갖고 있습니다. GHOST의 oracle-vs-배포 실측은 **90% vs 36.7%** (−53pt), RT-Affordance는 **76% vs 68%** (−8pt). 천장이 monolith 대비 +5뿐이라면, Model A의 실제 예측 오차가 배포된 분리안을 monolith *아래로* 확실히 떨어뜨립니다. **만들 것이 없습니다.**
 
-**KILL MODEL B (pivot to "learned A + classical IK") if:**
+**Model B 사망 ("학습된 A + 고전 IK"로 전환) 조건:**
 ```
-C8  ≥  C6 − 5 points
+C8  ≥  C6 − 5포인트
 ```
-Rationale: a zero-parameter analytic controller matched a 25M network. The whole PerAct/RVT/RVT-2 keypose family works exactly this way and gets precise manipulation from ~10 demos/task. If this fires, your project becomes "Model A + TRAC-IK + impedance," which is a *better* project, ships in a weekend, and frees your entire parameter budget for the half where GHOST says the error actually lives.
+근거: 파라미터 0개짜리 해석적 컨트롤러가 25M 네트워크와 동률입니다. PerAct/RVT/RVT-2 keypose 계열 전체가 정확히 이 방식으로 작동하고 작업당 ~10 데모로 정밀 조작을 얻습니다. 이게 발동하면 프로젝트는 "Model A + TRAC-IK + impedance"가 됩니다 — 이건 *더 나은* 프로젝트이고, 주말이면 출하되고, 파라미터 예산 전체를 GHOST가 오차가 실제로 산다고 말하는 절반에 해방시킵니다.
 
-**GO to E1 if:**
+**E1으로 GO 조건:**
 ```
-C6 − C0  ≥  +10 points  AND  C6 − C8  ≥  +5 points
+C6 − C0  ≥  +10포인트  AND  C6 − C8  ≥  +5포인트
 ```
 
-**PIVOT-REGIME if `+5 < C6 − C0 < +10`:** the ceiling is thin. Re-run E0 on **LIBERO-Long (10 long-horizon tasks)** and **CALVIN ABC→D** only. The orchestration study found hierarchy at +8.6 pts short-horizon but **+41.8 long-horizon and +30.0 reasoning-heavy**. If the ceiling is thin on short-horizon and fat on long-horizon, your project is a long-horizon project and you should say so in writing before continuing.
+**영역 전환(PIVOT-REGIME), `+5 < C6 − C0 < +10`일 때:** 천장이 얇습니다. E0를 **LIBERO-Long(장기 10작업)** 과 **CALVIN ABC→D**에서만 재실행하십시오. 오케스트레이션 연구는 계층이 단기 +8.6pt인데 **장기 +41.8, reasoning 중심 +30.0**임을 발견했습니다. 천장이 단기에서 얇고 장기에서 두껍다면, 당신 프로젝트는 장기 지평 프로젝트이고 **계속하기 전에 서면으로 그렇게 선언해야 합니다.**
 
-> **Why this is the right single kill-shot:** it costs 3 training runs and no data collection; it tests the *ceiling* of the architecture rather than one instantiation of it, so a negative result is not rescuable by "better Model A" or "more data"; and it simultaneously runs the Model-B-necessity test on the same harness for free.
+> **왜 이것이 올바른 단발 킬샷인가:** 학습 런 3회에 데이터 수집 0이고, 아키텍처의 한 구현이 아니라 *천장*을 검증하므로 음성 결과가 "더 나은 Model A"나 "더 많은 데이터"로 구제되지 않으며, 같은 하네스에서 Model-B-필요성 검증까지 공짜로 동시에 돌아갑니다.
 
 ---
 
-## E1 — Isolating THE SPLIT from every confound
-**2–3 weeks · sim · rent a 4090/A100 spot instance (~$100–250 total) or run 2 weeks on the Mac**
+## E1 — 분리를 모든 교란변수로부터 분리
+**2–3주 · 시뮬 · 4090/A100 spot 대여(~$100–250) 또는 Mac에서 2주**
 
-E0 established a ceiling. E1 asks whether the *deployed, separately-trained* split beats the *best* control — not the worst one.
+E0는 천장을 세웠습니다. E1은 *배포되고 분리 학습된* 분리안이 최악이 아니라 **최선의** 대조군을 이기는지 묻습니다.
 
-### The control ladder (name these explicitly in your writeup)
+### 대조군 사다리 (writeup에 이 이름들을 명시하십시오)
 
-All arms at **matched total parameters P**, **matched demonstration set D**, **matched initialization**, **matched effective command rate R**, **matched action representation**.
+모든 arm에서 **총 파라미터 P 일치**, **데모 세트 D 일치**, **초기화 일치**, **유효 명령 rate R 일치**, **행동 표현 일치.**
 
-| ID | Name | What it isolates |
+| ID | 이름 | 무엇을 분리하는가 |
 |---|---|---|
-| **C0** | **MONO** — one net, RGB+state → action chunk, P params | The baseline you must beat |
-| **C0s** | **MONO-SMALL** — one net at P_A params, and again at P_B params | The parameter-count scaling curve. Without this you cannot tell a "split gain" from "the effective model got bigger" |
-| **C1** | **MONO-AUX** — C0 + auxiliary head predicting future EE pose during training; head unused at runtime | **The π0.5 "implicit HL" control.** Isolates *decomposition-as-training-signal* from *decomposition-as-architecture*. OpenHelix's single largest gain (avg len 3.45→4.01) came from exactly this auxiliary head |
-| **C2** | **MONO-2PASS** — same weights as C1, but at runtime actually runs pose-then-action two-stage inference | Isolates *runtime hierarchy* from *parameter separation* |
-| **C3** | **SPLIT-JOINT** — two nets, P_A + P_B = P, trained end-to-end with gradients through a continuous interface | Isolates *two networks* from *two independently-trained networks* (the Helix/GR00T recipe) |
-| **C4** | **SPLIT-SEQ** — **your proposal.** A and B trained separately; non-differentiable pose interface; B trained on demo GT poses | The thing you actually want to build |
-| **C5** | **SPLIT-SEQ+DAGGER** — C4 + one DAgger relabeling round (roll A out, relabel, retrain B on A's actual output distribution) | Isolates the **cascaded covariate-shift tax**. GHIL-Glue measured this at +25% on CALVIN and 54%→70% real |
-| **C6** | **SPLIT-ORACLE** — from E0, carried forward | The architecture ceiling; the denominator for failure attribution |
-| **C7** | **SPLIT-IK** — learned A → analytic IK + OSC/impedance, zero learned low level | Isolates *whether Model B needs to be learned at all* |
+| **C0** | **MONO** — 네트워크 1개, RGB+state → action chunk, P 파라미터 | 이겨야 할 baseline |
+| **C0s** | **MONO-SMALL** — P_A 파라미터로 1개, P_B 파라미터로 또 1개 | 파라미터 수 스케일링 곡선. 이게 없으면 "분리 이득"과 "유효 모델이 커진 것"을 구분할 수 없습니다 |
+| **C1** | **MONO-AUX** — C0 + 학습 중 미래 EE 포즈를 예측하는 auxiliary head, 런타임 미사용 | **π0.5의 "implicit HL" 대조군.** *학습 신호로서의 분해*와 *아키텍처로서의 분해*를 분리. OpenHelix의 단일 최대 이득(avg len 3.45→4.01)이 정확히 이 auxiliary head에서 나왔습니다 |
+| **C2** | **MONO-2PASS** — C1과 같은 가중치, 단 런타임에 실제로 포즈-then-행동 2단 추론 | *런타임 계층*과 *파라미터 분리*를 분리 |
+| **C3** | **SPLIT-JOINT** — 네트워크 2개, P_A + P_B = P, 연속 인터페이스를 관통하는 gradient로 end-to-end 학습 | *네트워크 2개*와 *독립 학습된 네트워크 2개*를 분리 (Helix/GR00T 레시피) |
+| **C4** | **SPLIT-SEQ** — **당신의 제안.** A와 B를 따로 학습; 비미분 포즈 인터페이스; B는 데모 정답 포즈로 학습 | 실제로 만들고 싶어 하는 것 |
+| **C5** | **SPLIT-SEQ+DAGGER** — C4 + DAgger relabeling 1라운드 (A를 rollout, relabel, B를 A의 실제 출력 분포로 재학습) | **연쇄 covariate-shift 세금**을 분리. GHIL-Glue 실측: CALVIN +25%, 실기체 54%→70% |
+| **C6** | **SPLIT-ORACLE** — E0에서 이월 | 아키텍처 천장; 실패 귀속의 분모 |
+| **C7** | **SPLIT-IK** — 학습된 A → 해석적 IK + OSC/impedance, 학습된 저수준 0 | *Model B가 학습될 필요가 있는가*를 분리 |
 
-### Crossed confound factors (each is a separate axis, not a fixed setting)
+### 교차시킬 교란 요인 (각각 별도의 축이지, 고정 설정이 아님)
 
-| Confound | Levels | Why crossed, not held fixed |
+| 교란 | 수준 | 왜 고정이 아니라 교차인가 |
 |---|---|---|
-| **Pretraining** | {random init, DINOv2/SigLIP-pretrained vision, full VLM init} | Random→pretrained is **~20 points** (77.5% → 97.8% on LIBERO in a controlled study) — larger than any short-horizon hierarchy premium. If you hold init fixed you may be measuring pretraining and calling it hierarchy. Crossing it also tests whether the split's value is init-dependent (it probably is, and *negatively*: from-scratch local training forfeits the split's only real advantage) |
-| **Total parameters** | P ∈ {10M, 25M, 60M, 150M} for C0, C4, C7 | MoE scaling laws say split gains *diminish with scale*. You need the curve, not a point |
-| **Action chunk horizon** | H ∈ {1, 16, 50} × {C0, C4} | Chunking alone buys most of what people attribute to hierarchy. If C0@H=50 ≥ C4@H=50, the "split" was chunking |
-| **High-level update interval** | k ∈ {1, 10, 30, 60} steps for C4 | OpenHelix swept this and got 94/97/95/95/95/95/95 — essentially flat. Verify on *your* setup; if flat, your Model A can run at 1 Hz and H2's premise changes |
-| **Effective command rate** | {native, rate-matched to 30 Hz via chunking for all arms} | If the split's advantage vanishes at matched rate, you measured latency, and SmolVLA-style async gets it for ~50 lines of code |
-| **Action representation** | {EE absolute, EE chunk-wise delta, joint absolute, joint chunk-wise delta} × 6D rotation | Measured head-to-head on real hardware: **EE-absolute 69.0%, joint-absolute 77.3%, joint-delta 88.0%, EE-delta 89.6%.** Your specified interface is the *worst* of the four. This ablation alone may be worth more than the split |
-| **Interface encoding** | {raw 7-vector, chunk of 8–16 waypoints with gripper+dt, GMM rendered as image-plane heatmap, pose + learned latent} | GHOST used a GMM heatmap; RT-Affordance renders poses onto the image; RoboDual passes pose *and* latent. Nobody who succeeded passed a bare vector |
-| **Demo count** | N ∈ {10, 25, 50, 100, 200} per task, for C0, C1, C4, C7 | Produces the sample-efficiency curves and the crossover point |
+| **Pretraining** | {random init, DINOv2/SigLIP 사전학습 비전, 전체 VLM init} | random→pretrained가 **~20포인트** (통제 연구에서 LIBERO 77.5% → 97.8%) — 어떤 단기 계층 프리미엄보다 큽니다. init을 고정하면 pretraining을 측정하면서 계층이라 부르게 될 수 있습니다. 교차하면 분리의 가치가 init 의존적인지도 검증됩니다 (아마 의존적이고, *부정적으로*: 처음부터 로컬 학습은 분리의 유일한 실제 이점을 포기하는 것) |
+| **총 파라미터** | P ∈ {10M, 25M, 60M, 150M} — C0, C4, C7에 대해 | MoE scaling law는 분리 이득이 *규모에 따라 감소*한다고 말합니다. 점이 아니라 곡선이 필요합니다 |
+| **Action chunk horizon** | H ∈ {1, 16, 50} × {C0, C4} | chunking만으로 사람들이 계층에 귀속시키는 것 대부분을 삽니다. C0@H=50 ≥ C4@H=50이면 "분리"는 사실 chunking이었던 것 |
+| **상위 갱신 간격** | k ∈ {1, 10, 30, 60} 스텝 — C4에 대해 | OpenHelix가 이것을 sweep해서 94/97/95/95/95/95/95 — 사실상 평평. *당신* 환경에서 검증하십시오. 평평하면 Model A는 1Hz로 돌아도 되고 H2의 전제가 바뀝니다 |
+| **유효 명령 rate** | {native, 전 arm을 chunking으로 30Hz에 rate-match} | 분리의 우위가 rate 일치 시 사라지면 latency를 측정한 것이고, SmolVLA식 async가 코드 ~50줄로 그걸 줍니다 |
+| **행동 표현** | {EE 절대, EE chunk delta, 관절 절대, 관절 chunk delta} × 6D rotation | 실기체 정면 실측: **EE 절대 69.0%, 관절 절대 77.3%, 관절 delta 88.0%, EE delta 89.6%.** 당신이 명시한 인터페이스가 넷 중 *최악*입니다. 이 ablation 하나가 분리 자체보다 가치 있을 수 있습니다 |
+| **인터페이스 인코딩** | {날 것의 7-vector, gripper+dt 붙은 8–16 waypoint chunk, 이미지 평면 heatmap으로 렌더링한 GMM, 포즈 + 학습된 latent} | GHOST는 GMM heatmap을 썼고, RT-Affordance는 포즈를 이미지에 렌더링했고, RoboDual은 포즈*와* latent를 넘깁니다. **성공한 어느 누구도 맨 벡터를 넘기지 않았습니다** |
+| **데모 수** | N ∈ {10, 25, 50, 100, 200}/작업 — C0, C1, C4, C7에 대해 | 표본 효율 곡선과 교차점을 만들어냅니다 |
 
-**Practical scoping:** the full cross is thousands of runs. Do it as a **staged screen**: (1) fix everything at the literature-best setting and run the C0…C7 ladder once (8 arms × 3 seeds = 24 runs); (2) take the top-2 arms and sweep only the confounds where the ladder was close; (3) sweep demo count last, on 3 arms only.
+**실무적 범위 설정:** 전체 교차는 수천 런입니다. **단계적 스크리닝**으로 하십시오: (1) 전부 문헌 최선 설정에 고정하고 C0…C7 사다리를 1회 (8 arm × 3 seed = 24 런); (2) 상위 2개 arm만 잡아 사다리가 박빙이었던 교란만 sweep; (3) 데모 수는 마지막에, 3개 arm에만.
 
-**Evaluation:** ≥1,000 episodes/arm (detects ~6.3 pts), ≥2,000 for the final head-to-head (detects ~4.4 pts). Report 3 seeds; seed variance in BC on LIBERO is commonly ±3–5 pts, so any claim under 5 pts is noise.
+**평가:** arm당 ≥1,000 에피소드 (~6.3pt 탐지), 최종 정면 대결에는 ≥2,000 (~4.4pt 탐지). 3 seed 보고. LIBERO에서 BC의 seed 분산은 흔히 ±3–5pt이므로 **5pt 미만의 어떤 주장도 노이즈입니다.**
 
-### Decision rules
+### 판정 규칙
 
-**GO to E2 only if:**
+**E2로 GO하는 유일한 조건:**
 ```
-C5  −  max(C0, C1, C2, C7)  ≥  +8 points   on ≥3 of 4 benchmark suites,
-with non-overlapping 95% CIs
+C5  −  max(C0, C1, C2, C7)  ≥  +8포인트   — 4개 벤치마크 스위트 중 ≥3에서,
+95% CI 비중첩으로
 ```
 
-**NO-GO with named verdicts:**
+**이름 붙은 NO-GO 판정:**
 
-| Condition | Verdict | What you actually learned |
+| 조건 | 판정 | 실제로 배운 것 |
 |---|---|---|
-| `C1 ≥ C5 − 3` | **The benefit was the training signal.** | Ship C1. One model, one forward pass, auxiliary pose head. Half the latency, no interface, no covariate shift, no second dataset. This is π0.5's own finding |
-| `C7 ≥ C5 − 3` | **Model B is unnecessary.** | Ship A + TRAC-IK + impedance. Move all parameters to A |
-| `C3 ≥ C5 + 8` | **Separate training is the problem, not the split.** | Move to joint training through a continuous latent (Helix), or freeze-A + pre-aligned projector (OpenHelix — without pre-alignment, *every* configuration scored 0/0/0/0/0) |
-| `C5 − C4 ≥ +10` | **Covariate shift is your dominant error term.** | DAgger on the interface is mandatory, permanently, after every Model A retrain |
-| Split advantage vanishes when init is crossed to pretrained | **You measured pretraining.** | Use a pretrained VLM for A or abandon the architecture |
-| Split advantage vanishes at matched command rate | **You measured latency.** | Implement async chunking on the monolith; delete the second model |
-| `C0` at P ≈ `C0` at P/2 (flat scaling curve) | **You're not capacity-limited at all.** | The whole "split the parameter budget" framing is moot; you're data-limited. Go to E2c |
+| `C1 ≥ C5 − 3` | **이득은 학습 신호였다** | C1을 출하하십시오. 모델 1개, forward 1회, auxiliary 포즈 head. latency 절반, 인터페이스 없음, covariate shift 없음, 두 번째 데이터셋 없음. π0.5 자신의 발견입니다 |
+| `C7 ≥ C5 − 3` | **Model B는 불필요하다** | A + TRAC-IK + impedance를 출하. 파라미터 전부를 A로 |
+| `C3 ≥ C5 + 8` | **문제는 분리가 아니라 분리 학습이다** | 연속 latent를 관통하는 joint 학습(Helix)으로, 또는 A 동결 + 사전 정렬된 projector(OpenHelix — 사전 정렬 없이는 *모든* 구성이 0/0/0/0/0)로 |
+| `C5 − C4 ≥ +10` | **covariate shift가 지배적 오차 항이다** | 인터페이스 DAgger가 필수이고, 영구적이며, Model A 재학습 때마다 반복 |
+| pretrained init 교차 시 분리 우위 소멸 | **pretraining을 측정한 것** | A에 사전학습 VLM을 쓰거나 아키텍처를 포기 |
+| rate 일치 시 분리 우위 소멸 | **latency를 측정한 것** | monolith에 async chunking 구현; 두 번째 모델 삭제 |
+| P의 `C0` ≈ P/2의 `C0` (평평한 스케일링 곡선) | **애초에 용량 제한이 아니다** | "파라미터 예산을 나눈다"는 프레임 전체가 무의미. 데이터 제한 상태입니다. E2c로 가십시오 |
 
 ---
 
-## E2 — Regime tests: where hierarchy is *allowed* to win
-**1–2 weeks · sim · run only if E1 passed**
+## E2 — 영역 검증: 계층이 이기는 것이 *허용되는* 곳
+**1–2주 · 시뮬 · E1 통과 시에만**
 
-E1 was run on the regime where the literature says hierarchy ties. E2 tests the regimes where it wins, and the generalization axes you care about.
+E1은 문헌이 계층이 동률이라 말하는 영역에서 돌았습니다. E2는 계층이 이기는 영역과, 당신이 신경 쓰는 일반화 축을 검증합니다.
 
-### E2a — Dynamic tasks (the one regime with a large published effect)
-HiRT: static tasks 70.0 vs 71.3 (mono ahead); **dynamic tasks (objects moving at 1 cm/s) 75 vs 48** (split ahead by 27). OpenHelix CALVIN-D: single-system RoboFlamingo scored 100% static / **0% on all four dynamic conditions**.
+### E2a — 동적 작업 (출판된 큰 효과가 있는 유일한 영역)
+HiRT: 정적 70.0 vs 71.3 (단일 우세); **동적(1cm/s로 움직이는 물체) 75 vs 48** (분리가 27 우세). OpenHelix CALVIN-D: 단일 시스템 RoboFlamingo가 정적 100% / **동적 4개 조건 전부 0%.**
 
-- Venue: **CALVIN-D** (objects move during episode), **ManiSkill3** dynamic variants, **MuJoCo Playground** with scripted object velocity.
-- Manipulation: object translation at {0, 1, 3, 10} cm/s during the episode.
-- Metric: success vs object speed. Report the *slope*, not just the mean.
-- **GO if the split's advantage grows monotonically with object speed.** If it's flat in speed, the split is not buying reactivity and H2 is dead.
+- 장소: **CALVIN-D**(에피소드 중 물체 이동), **ManiSkill3** 동적 변형, **MuJoCo Playground** + 스크립트된 물체 속도.
+- 조작: 에피소드 중 물체 병진 {0, 1, 3, 10} cm/s.
+- 지표: 물체 속도 대비 성공률. 평균이 아니라 **기울기**를 보고.
+- **분리의 우위가 물체 속도에 대해 단조 증가하면 GO.** 속도에 평평하면 분리는 반응성을 사주지 않는 것이고 H2는 죽었습니다.
 
-### E2b — Perturbation recovery
-- Scripted disturbances applied at t = T/2: object nudge {2, 5, 10} cm lateral; arm push (external wrench 5 N for 200 ms); 0.5 s camera occlusion; gripper slip (release + re-grasp required).
-- Metric: **recovery rate** = fraction of episodes that reach success *after* the perturbation, conditioned on being on-track before it.
-- Secondary: time-to-recovery, and whether the high level re-queries (this is where the missing switching/termination policy will bite — the orchestration study found ablated hierarchies collapsing from ~95% to near 0 on this axis).
+### E2b — 교란 복구
+- t = T/2에 스크립트 교란: 물체 옆으로 밀기 {2, 5, 10} cm; 팔 밀기(외부 wrench 5N, 200ms); 카메라 가림 0.5초; 그리퍼 미끄러짐(놓았다가 재파지 필요).
+- 지표: **복구율** = 교란 전 정상 궤도에 있었다는 조건 하에, 교란 *후* 성공에 도달한 에피소드 비율.
+- 보조: 복구 시간, 그리고 상위가 재질의(re-query)하는가 — 빠진 전환/종료 정책이 무는 곳이 여기입니다. 오케스트레이션 연구는 ablated 계층이 이 축에서 ~95%에서 거의 0으로 붕괴하는 것을 발견했습니다.
 
-### E2c — The data-provenance test (H3 — probably your real result)
-This is the mechanism that actually made every pose-interface system work, and it is **not tested by any arm above**.
+### E2c — 데이터 출처 검증 (H3 — 아마 당신의 진짜 결과)
+**모든 포즈 인터페이스 시스템을 실제로 작동하게 만든 메커니즘이고, 위의 어떤 arm도 이것을 검증하지 않습니다.**
 
-- **C4+ARM (split with off-domain high-level data):** Model A additionally trained on data Model B structurally cannot consume — sim-rendered scenes from other embodiments, ~750–2,000 hand-annotated still frames (RT-Affordance's number: 1 h to collect, 2 h to annotate), point-labeled web images, action-free human video with hand-pose extraction.
-- **C0+ARM (monolith with the same extra data):** the honest control — can the monolith absorb it too? (Usually only partially, via auxiliary losses.)
-- **GO signal:** `C4+ARM − C4 ≥ +15 points` while `C0+ARM − C0 < +5`. That is the split earning its existence through *data access*, which is the claim the literature supports. RT-Affordance's ablation is the shape to expect: 77% → 24% without the annotated images, → 11% without web co-training.
+- **C4+ARM (off-domain 상위 데이터를 더한 분리):** Model A를 Model B가 구조적으로 소비할 수 없는 데이터로 추가 학습 — 다른 embodiment의 시뮬 렌더 장면, 손 주석 정지 프레임 ~750–2,000장 (RT-Affordance의 숫자: 수집 1시간, 주석 2시간), 포인트 라벨된 웹 이미지, hand-pose 추출한 action-free 인간 비디오.
+- **C0+ARM (같은 추가 데이터를 받은 monolith):** 정직한 대조군 — monolith도 그것을 흡수할 수 있는가? (보통 auxiliary loss로 부분적으로만.)
+- **GO 신호:** `C4+ARM − C4 ≥ +15포인트` 이면서 `C0+ARM − C0 < +5`. 그것이 분리가 *데이터 접근*으로 존재 이유를 버는 것이고, 문헌이 지지하는 주장입니다. RT-Affordance의 ablation이 기대할 형태입니다: 주석 이미지 없으면 77% → 24%, 웹 공동학습 없으면 → 11%.
 
-### E2d — Generalization axes (report each separately, never averaged)
-Hold the policy fixed; vary one factor at a time, 200 episodes each:
+### E2d — 일반화 축 (각각 따로 보고, 절대 평균 내지 말 것)
+정책을 고정하고 한 번에 한 요인만 변화, 각 200 에피소드:
 
-| Axis | Manipulation | Suites |
+| 축 | 조작 | 스위트 |
 |---|---|---|
-| Novel object instance | Same category, unseen mesh/texture | LIBERO-Object, ManiSkill3 |
-| Novel object category | Unseen category entirely | ManiSkill3, SimplerEnv |
-| Novel position | Initial pose sampled *outside* the training convex hull | Any (custom reset dist) |
-| Novel lighting | Ambient ±50%, directional angle ±45°, color temp 3000–7000 K | robosuite renderer |
-| Novel camera pose | Extrinsic perturbed 5 cm / 10° | robosuite; also the OC-VLA frame test |
-| Novel distractors | +3 unseen objects in scene | LIBERO-Spatial |
-| Instruction rephrasing | CALVIN-E enriched instructions | CALVIN-E |
+| 신규 물체 인스턴스 | 같은 카테고리, 미지의 mesh/텍스처 | LIBERO-Object, ManiSkill3 |
+| 신규 물체 카테고리 | 완전히 미지의 카테고리 | ManiSkill3, SimplerEnv |
+| 신규 위치 | 학습 convex hull *밖*에서 초기 포즈 샘플링 | 아무거나 (커스텀 reset 분포) |
+| 신규 조명 | ambient ±50%, 방향 ±45°, 색온도 3000–7000K | robosuite 렌더러 |
+| 신규 카메라 포즈 | extrinsic을 5cm / 10° 섭동 | robosuite; OC-VLA 프레임 테스트도 |
+| 신규 방해물 | 장면에 미지 물체 +3 | LIBERO-Spatial |
+| 지시문 재표현 | CALVIN-E 확장 지시문 | CALVIN-E |
 
-**Also run E2d with the oracle interface (C6).** The gap `C6 − C4` on each axis is your **failure attribution**: it tells you what fraction of each generalization failure is Model A's pose error versus Model B's execution. GHOST used exactly this and found 40% → 90% from swapping only the high level, which is what proved the bottleneck was upstream.
+**E2d를 oracle 인터페이스(C6)로도 돌리십시오.** 각 축의 `C6 − C4` 격차가 당신의 **실패 귀속**입니다: 각 일반화 실패의 몇 %가 Model A의 포즈 오차이고 몇 %가 Model B의 실행인지 알려줍니다. GHOST가 정확히 이것을 써서 상위만 바꿔 40% → 90%를 얻었고, 그것이 병목이 상류라는 것을 증명한 방법입니다.
 
-### E2e — Sim-to-real correlation check (cheap insurance)
-Before spending real-robot months, run your top-2 arms on **SimplerEnv** (Bridge + Google Robot real-to-sim). If your sim ranking doesn't correlate with SimplerEnv's, you have no reason to believe the sim conclusion transfers. Google ran **>90% of Gemini Robotics 1.5 development evals in simulation** — but they validated the correlation first.
-
----
-
-## E3 — Rate and systems measurement on the actual target box
-**1 week · your hardware · no training**
-
-This is where H2 lives or dies, and it is a *measurement* task, not a modeling task.
-
-**Measure, do not extrapolate:**
-
-1. **MONO + chunking + async, on the Mac mini.** One model, H=50 chunks, SmolVLA-style RobotClient/PolicyServer with `chunk_size_threshold ≈ 0.6`, weighted-average temporal ensembling. Record: effective command rate, p50/p95/p99/max photon-to-command latency, queue-underrun rate.
-2. **SPLIT (two processes).** Same, with A and B. Record the same.
-3. **SPLIT with Model B stripped of RGB** (interface + joints + wrench only).
-4. **SPLIT with A in MLX/Metal (GPU) and B compiled to CoreML pinned to `cpuAndNeuralEngine`, GPU explicitly excluded.** Verify ANE residency with `powermetrics` and the CoreML performance report — CoreML silently falls back to GPU on unsupported ops and will recreate the contention you're trying to avoid.
-
-**Reference numbers to compare against (M4-base, measured):** ViT-B/16 fp16 b1 = 62.75 ms p50 solo → 214.29 p50 / 288.91 p99 concurrent. 805M-param model over 1024 visual tokens = 467 ms p50 solo → 500 p50 / 628 p99 concurrent. Proprio-scale MLP = 2.18 ms p50 / 2.80 p99. Total GPU throughput is conserved: **two models on one GPU cost the sum of their latencies.**
-
-**Decision rules:**
-```
-KILL H2 if:  MONO+chunking achieves ≥30 Hz effective command rate with p99 < 2×p50
-GO on H2 only if:  SPLIT achieves ≥2× MONO's effective rate AND fast-loop p99 < 50 ms
-```
-Also record: `kern.sched` (Apple's `edge` scheduler migrates threads across P/E cores), whether `thread_time_constraint_policy` is in use, and the jitter ratio p99/p50 under camera capture + display load. **If the ≥500 Hz servo loop is planned to run on macOS, stop and move it** — to the arm's own controller or a Linux SBC over wired Ethernet (measured cost of that hop in the literature: ~0–4 ms, i.e. free). That single change moots every macOS real-time objection while keeping the Mac as an inference server, which it's good at.
+### E2e — Sim-to-real 상관 점검 (값싼 보험)
+실기체에 몇 달을 쓰기 전에, 상위 2개 arm을 **SimplerEnv**(Bridge + Google Robot real-to-sim)에서 돌리십시오. 당신의 시뮬 순위가 SimplerEnv와 상관이 없다면, 시뮬 결론이 전이된다고 믿을 이유가 없습니다. Google은 **Gemini Robotics 1.5 개발 평가의 >90%를 시뮬레이션에서** 돌렸습니다 — 단, 상관을 먼저 검증한 뒤에.
 
 ---
 
-## E4 — Real-robot pilot
-**3–4 weeks · run only if E1 passed with ≥15 points**
+## E3 — 실제 대상 기기에서의 rate·시스템 측정
+**1주 · 당신의 하드웨어 · 학습 없음**
 
-**Why the 15-point bar:** on a real arm you can realistically afford ~400 rollouts per arm, which detects ~10 points at 80% power. HiRT's split-vs-mono gap on real quasi-static tasks was **1.3 points**. TRI needed **50 rollouts per task per policy per condition, 1,800 total trials, blind randomized A/B, Bayesian posteriors, Bonferroni correction** to separate policies. If E1 gave you 8 points in sim, the real robot cannot resolve it and E4 is a waste of months.
+H2가 살고 죽는 곳이고, 모델링 과제가 아니라 *측정* 과제입니다.
 
-### Hardware options by budget
+**외삽하지 말고 측정하십시오:**
 
-| Platform | ~Cost | Control interface | What it can test |
+1. **MONO + chunking + async.** 모델 1개, H=50 chunk, SmolVLA식 RobotClient/PolicyServer(`chunk_size_threshold ≈ 0.6`), 가중 평균 temporal ensembling. 기록: 유효 명령 rate, photon-to-command latency p50/p95/p99/max, queue underrun 비율.
+2. **SPLIT (프로세스 2개).** A와 B로 동일하게.
+3. **Model B에서 RGB를 뺀 SPLIT** (인터페이스 + 관절 + wrench만).
+4. **A는 MLX/Metal(GPU), B는 CoreML로 컴파일해 `cpuAndNeuralEngine` 고정, GPU 명시적 제외한 SPLIT.** `powermetrics`와 CoreML performance report로 ANE 상주를 검증하십시오 — CoreML은 미지원 연산에서 조용히 GPU로 폴백해 피하려던 경합을 재생성합니다.
+
+**비교 기준 수치 (M4-base, 실측):** ViT-B/16 fp16 b1 = 단독 62.75ms p50 → 동시 214.29 p50 / 288.91 p99. 비주얼 토큰 1024개 위의 805M 모델 = 단독 467ms p50 → 동시 500 p50 / 628 p99. proprio 스케일 MLP = 2.18ms p50 / 2.80 p99. GPU 총 처리량은 보존됩니다: **한 GPU 위의 두 모델은 latency의 합을 치릅니다.**
+
+**판정 규칙:**
+```
+H2 사망 조건:  MONO+chunking이 유효 명령 rate ≥30Hz를 p99 < 2×p50으로 달성
+H2 GO 조건:   SPLIT이 MONO 유효 rate의 ≥2배 달성 AND 빠른 루프 p99 < 50ms
+```
+추가 기록: `kern.sched`(Apple의 `edge` 스케줄러는 스레드를 P/E 코어 사이로 이주시킵니다), `thread_time_constraint_policy` 사용 여부, 카메라 캡처 + 디스플레이 부하 하의 jitter 비율 p99/p50. **≥500Hz 서보 루프를 macOS에서 돌릴 계획이라면, 멈추고 옮기십시오** — 팔 자체 컨트롤러나 유선 이더넷의 Linux SBC로 (문헌상 그 홉의 실측 비용: ~0–4ms, 즉 무료). 그 한 번의 변경이 macOS 실시간성 반론 전부를 무효로 만들면서 Mac을 잘하는 일(추론 서버)에 남겨둡니다.
+
+---
+
+## E4 — 실기체 파일럿
+**3–4주 · E1이 ≥15포인트로 통과한 경우에만**
+
+**왜 15포인트 기준선인가:** 실기체에서 현실적으로 감당 가능한 것은 arm당 ~400 rollout이고, 이것이 80% 검정력에서 ~10포인트를 탐지합니다. HiRT의 실기체 준정적 분리-vs-단일 격차는 **1.3포인트**였습니다. TRI는 정책을 구분하는 데 **작업·정책·조건당 50 rollout, 총 1,800 시행, blind 무작위 A/B, Bayesian posterior, Bonferroni 보정**이 필요했습니다. E1이 시뮬에서 8포인트를 줬다면 실기체는 그것을 분해할 수 없고 E4는 몇 달 낭비입니다.
+
+### 예산별 하드웨어 선택지
+
+*(참고: 이 표는 G1 확정 전에 작성된 일반론입니다. 실기체는 G1으로 확정 — 위치 전용, 손목 F/T 표준 탑재.)*
+
+| 플랫폼 | ~비용 | 제어 인터페이스 | 검증 가능한 것 |
 |---|---|---|---|
-| **SO-101 (×2, leader/follower)** | $250–500 | Serial-bus servo, **position only** | Free-space pick/place, generalization, sample efficiency. **Cannot test compliance.** LeRobot native, MPS-supported, async inference built in |
-| **Koch v1.1** | ~$400 | Position only | Same class as SO-101 |
-| **ALOHA / bimanual SO-101** | $1k–30k | Position, 50 Hz | Bimanual coordination, long-horizon. Tests the relative-transform interface question |
-| **UR5 / UR5e (used)** | $10k–35k | RTDE 500 Hz, `servoJ`, force mode | Rate decoupling, basic compliance |
-| **Franka Panda / FR3** | $20k–30k | **FCI 1 kHz torque + Cartesian impedance, joint torque sensing** | The only one where the contact/stiffness justification for Model B is testable at all |
-| Add-on: Robotiq FT-300 / Bota | $3k–5k | 6-axis wrench | Contact-force metric; enables ForceVLA-class comparisons |
-| Poor-man's proxy | $0 | Servo current draw (SO-101 exposes it) | Crude contact detection, adequate for a stall/jam metric |
+| **SO-101 (×2, leader/follower)** | $250–500 | 시리얼 버스 서보, **위치 전용** | 자유공간 pick/place, 일반화, 표본 효율. **compliance 검증 불가.** LeRobot 네이티브, MPS 지원, async 추론 내장 |
+| **Koch v1.1** | ~$400 | 위치 전용 | SO-101과 같은 부류 |
+| **ALOHA / 양팔 SO-101** | $1k–30k | 위치, 50Hz | 양팔 협응, 장기 지평. 상대 변환 인터페이스 질문을 검증 |
+| **UR5 / UR5e (중고)** | $10k–35k | RTDE 500Hz, `servoJ`, force mode | rate 분리, 기초 compliance |
+| **Franka Panda / FR3** | $20k–30k | **FCI 1kHz 토크 + Cartesian impedance, 관절 토크 센싱** | Model B의 접촉/stiffness 정당화를 검증할 수 있는 유일한 것 |
+| 애드온: Robotiq FT-300 / Bota | $3k–5k | 6축 wrench | 접촉력 지표; ForceVLA급 비교 가능 |
+| 빈자의 프록시 | $0 | 서보 전류 (SO-101이 노출) | 조잡한 접촉 감지, stall/jam 지표로는 충분 |
 
-**Recommendation for a hobbyist/lab budget doing this honestly: SO-101 pair (~$400) for E4, and rent/borrow a Franka for one week only if E2 showed the split winning on contact-rich tasks.** Do not buy a Franka to test H1.
+**정직하게 하는 취미/랩 예산 권고: E4는 SO-101 페어(~$400), Franka는 E2가 접촉 작업에서 분리의 승리를 보여준 경우에만 1주 대여/차용.** H1을 검증하려고 Franka를 사지 마십시오.
 
-### Teleop demonstration budget
+### 텔레옵 데모 예산
 
-| Stage | New teleop demos | Wall-clock |
+| 단계 | 새 텔레옵 데모 | 시간 |
 |---|---|---|
-| E0, E1, E2a/b/d | **0** (LIBERO/CALVIN/ManiSkill ship demos) | — |
-| E2c off-domain data for A | 0 teleop; **~750–2,000 annotated still frames** | ~1 h collect + 2–3 h annotate |
-| **E4 pilot** | **5 tasks × 50 demos = 250** | **6–10 h** including resets |
-| E4 DAgger round | 0 teleop (autonomous rollouts + hindsight relabel) | ~3 h robot time |
-| E5 powered comparison | **0 new demos** — same 250 | — |
-| If sample-efficiency curve needed on real | +5 tasks × 150 = 750 more | +20–30 h |
+| E0, E1, E2a/b/d | **0** (LIBERO/CALVIN/ManiSkill이 데모 동봉) | — |
+| E2c의 A용 off-domain 데이터 | 텔레옵 0; **주석 정지 프레임 ~750–2,000장** | 수집 ~1h + 주석 2–3h |
+| **E4 파일럿** | **5작업 × 50 = 250** | 리셋 포함 **6–10h** |
+| E4 DAgger 라운드 | 텔레옵 0 (자율 rollout + hindsight relabel) | 로봇 시간 ~3h |
+| E5 검정력 비교 | **새 데모 0** — 같은 250 | — |
+| 실기체 표본 효율 곡선이 필요하면 | +5작업 × 150 = 750 추가 | +20–30h |
 
-**Realistic totals:** ~250 demos to get a working pilot; ~1,000 demos if you need real-robot sample-efficiency curves. For reference: π0 fine-tunes on 50–200 bimanual demos/task; OpenVLA shows in-distribution gains from as few as 10; SmolVLA reports 60.0% average at 200/task; the keypose+planner family gets precise manipulation from **~10 demos/task**.
+**현실적 총계:** 작동하는 파일럿에 ~250 데모; 실기체 표본 효율 곡선까지 필요하면 ~1,000 데모. 참고: π0는 작업당 양팔 데모 50–200개로 fine-tuning; OpenVLA는 10개에서도 in-distribution 이득; SmolVLA는 200개/작업에서 평균 60.0%; keypose+플래너 계열은 **~10 데모/작업**으로 정밀 조작.
 
-**Critical scheduling constraint:** Model B's dataset **cannot be collected until Model A exists**, because B must be trained on A's error distribution, not on demo ground truth. The schedule is strictly `train A → roll out A → hindsight relabel → train B`. Every Model A retrain invalidates B's dataset. Budget a DAgger round after *every* A retrain, and pin `(A-version, B-version, calibration-version)` as a single deployable artifact.
+**결정적 일정 제약:** Model B의 데이터셋은 **Model A가 존재하기 전에는 수집할 수 없습니다** — B는 데모 정답이 아니라 A의 오차 분포로 학습돼야 하기 때문입니다. 일정은 엄격히 `A 학습 → A rollout → hindsight relabel → B 학습`입니다. **Model A를 재학습할 때마다 B의 데이터셋이 무효화됩니다.** *모든* A 재학습 후 DAgger 라운드를 예산에 넣고, `(A버전, B버전, 캘리브레이션버전)`을 단일 배포 아티팩트로 고정하십시오.
 
-### E4 arms (pilot, 3 arms only)
-`C0` (mono), `C5` (split + DAgger), `C7` (learned A + TRAC-IK/OSC). 5 tasks, 20 rollouts each = 100/arm. This is **underpowered by design** — it is a debugging and instrumentation pass, not a comparison. Its purpose is to shake out staleness, frame errors, safety trips, and NaNs before you spend on E5.
+### E4 arm (파일럿, 3개만)
+`C0`(단일), `C5`(분리 + DAgger), `C7`(학습된 A + TRAC-IK/OSC). 5작업 × 각 20 rollout = arm당 100. **의도적으로 검정력 미달**입니다 — 비교가 아니라 디버깅·계측 pass입니다. 목적은 E5에 돈을 쓰기 전에 staleness, 프레임 오류, 안전 트립, NaN을 털어내는 것입니다.
 
-### Mandatory instrumentation before E4 (build this *first*)
-- **Non-learned reflex layer, in code, below both models:** joint position/velocity/acceleration/jerk clamps; torque or motor-current threshold with auto-retract; workspace bounding box; self-collision + reachability rejection; finite/in-range assertion on both models' outputs; step-magnitude limiter (reject any joint command >N mrad from current measured config); deadman watchdog (hold-last-good, then ramp velocity to zero after K missed deadlines).
-- **Typed, timestamped, versioned interface message:** SE(3) target (**6D continuous rotation**, never Euler or raw quaternion) + gripper command + duration/velocity scale + capture timestamp + head/base joint state **at capture** + frame id + sequence number + validity horizon. Convert to `base_link` at A's output using the capture-time head state, never inside B. Stale policy: beyond the horizon, hold and decay to zero — never extrapolate.
-- **Oracle harness:** (a) Oracle-A — replay hindsight GT poses into B; (b) Oracle-B — swap B for TRAC-IK+impedance, feed A's live poses. Without these two you cannot attribute a single real-world failure to A vs B vs interface vs staleness vs calibration, and each hypothesis costs a week to chase.
-- **Offline replay regression test:** replay a fixed logged interface trace through B, assert command bounds + smoothness. Catches the silent A-retrain-breaks-B regression in CI instead of on the robot.
-
----
-
-## E5 — Powered real-robot comparison
-**4–6 weeks · run only if E4 was clean and E1 gave ≥15 points**
-
-- **Arms:** `C0` (mono, matched params, matched init, matched effective rate via chunking) vs `C5` (split + DAgger) vs `C7` (A + IK). Three arms.
-- **Design:** 5 tasks × **80 rollouts per arm per task = 400 per arm**, 1,200 total. Blind (operator does not know which policy is loaded), randomized order, fixed reset protocol with marked object positions, fixed lighting log.
-- **Statistics:** two-proportion tests with Bonferroni correction across tasks; Beta/Dirichlet posteriors with credible intervals; Compact Letter Display for the multi-arm comparison. Report per-task, never a single average.
-- **Minimum detectable effect:** n=400 → ~9.9 points. n=250 → ~12.5. n=180 → ~14.8. State this in your writeup.
+### E4 전 필수 계측 (이것을 *먼저* 만드십시오)
+- **학습되지 않은 반사층, 코드로, 두 모델 아래에:** 관절 위치/속도/가속/jerk 클램프; 토크 또는 모터 전류 임계값 + 자동 후퇴; 작업공간 bounding box; self-collision + 도달가능성 거부; 두 모델 출력 모두에 finite/범위 assert; 스텝 크기 제한기(현재 측정 형상에서 N mrad 이상 벗어난 관절 명령 거부); deadman watchdog(last-good 유지 후 K회 데드라인 누락 시 속도를 0으로 ramp).
+- **타입 있고 타임스탬프 있고 버전 있는 인터페이스 메시지:** SE(3) 목표(**6D continuous rotation**, Euler나 raw quaternion 절대 금지) + 그리퍼 명령 + duration/속도 스케일 + 촬영 타임스탬프 + **촬영 시각의** 헤드/베이스 관절 상태 + frame id + 시퀀스 번호 + 유효 지평. `base_link` 변환은 A의 출력에서 촬영 시각 헤드 상태로 — 절대 B 내부에서 하지 말 것. stale 정책: 지평을 넘으면 유지 후 0으로 감쇠 — **절대 외삽 금지.**
+- **Oracle 하네스:** (a) Oracle-A — hindsight 정답 포즈를 B에 replay; (b) Oracle-B — B를 TRAC-IK+impedance로 교체하고 A의 실시간 포즈를 공급. 이 둘이 없으면 실기체 실패 하나도 A vs B vs 인터페이스 vs staleness vs 캘리브레이션으로 귀속시킬 수 없고, 가설 하나 쫓는 데 일주일씩 듭니다.
+- **오프라인 replay 회귀 테스트:** 고정된 로그 인터페이스 trace를 B에 replay하고 명령 경계 + smoothness를 assert. A-재학습이-B를-깨는 조용한 회귀를 로봇이 아니라 CI에서 잡습니다.
 
 ---
 
-## Metrics — full definitions
+## E5 — 검정력 확보 실기체 비교
+**4–6주 · E4가 깨끗했고 E1이 ≥15포인트를 준 경우에만**
 
-**Primary**
-1. **Task success** — binary, per predefined criterion, judged from video by a rater blind to condition.
-2. **Progress score** — partial credit over predefined subgoals (grasp achieved / lifted / transported / placed). Success rate alone will not separate policies at these effect sizes.
-
-**Control & timing** (log every cycle; report distributions, never means)
-3. **Control rate achieved** — commands/s at the servo input, p50 and p5 (worst-case sustained).
-4. **End-to-end latency** — photon (camera timestamp) → joint command at the servo. Report **p50 / p95 / p99 / max**.
-5. **Jitter ratio** — p99/p50. A healthy edge stack looks like the Jetson reference: 150.5 ms mean, **0.13 ms std**, range 150.4–151.0. If yours is >2×, you have a scheduling or contention problem, not a model problem.
-6. **Interface staleness** — age of the Model A output at the moment Model B consumes it. p50/p99.
-7. **Queue underrun rate** — fraction of control cycles with no action available.
-
-**Physical accuracy**
-8. **Pose tracking error** — ‖achieved EE pose − commanded target‖: translation (mm) and rotation (deg), RMS and p95, reported *separately per task phase* (free-space approach vs contact).
-9. **Interface error** — ‖A's predicted pose − hindsight GT pose‖. This is the single most diagnostic number in the whole system.
-10. **Terminal placement error** — final object pose vs goal pose.
-11. **Path smoothness** — RMS joint jerk; count of sign reversals in joint velocity (catches IK branch-flipping and chunk-boundary discontinuity).
-
-**Contact**
-12. **Peak contact force / wrench** during contact phases (F/T sensor, or MuJoCo contact force in sim, or motor current as proxy).
-13. **RMS contact force** during sustained contact (wiping, insertion).
-14. **Jam/stall rate** — episodes terminated by current limit or force threshold.
-
-**Robustness**
-15. **Recovery rate** — success after scripted perturbation, conditioned on being on-track pre-perturbation. Report per perturbation type and magnitude.
-16. **Time-to-recovery**.
-17. **Livelock rate** — episodes where the same failed action repeats ≥3 times (this is the missing switching/termination policy showing up).
-
-**Generalization** — success on each of the 7 axes in E2d, reported separately, plus the `C6 − C4` oracle gap per axis as attribution.
-
-**Sample efficiency**
-18. **Success vs N demos** curve at N ∈ {10, 25, 50, 100, 200}, with **crossover N*** (the demo count at which split overtakes mono, if ever). If split only wins at large N, it is not the sample-efficiency story you wanted.
-
-**Safety / liveness** (per 100 rollouts)
-19. Joint-limit trips · velocity-clamp trips · IK-infeasible rejections · workspace-bound rejections · finite/range rejections · watchdog trips · human interventions.
-
-**Attribution**
-20. **Oracle gap** `C6 − C4` — fraction of the remaining error owned by Model A.
-21. **Classical gap** `C7 − C4` — how much (or how little) the learned Model B is worth.
+- **Arm:** `C0`(단일, 파라미터·init·chunking을 통한 유효 rate 일치) vs `C5`(분리 + DAgger) vs `C7`(A + IK). 3개.
+- **설계:** 5작업 × **arm·작업당 80 rollout = arm당 400**, 총 1,200. blind(조작자는 어느 정책이 로드됐는지 모름), 무작위 순서, 물체 위치를 표시한 고정 리셋 프로토콜, 조명 로그 고정.
+- **통계:** 작업 간 Bonferroni 보정한 two-proportion 검정; credible interval 있는 Beta/Dirichlet posterior; 다중 arm 비교에 Compact Letter Display. **작업별 보고, 절대 단일 평균 금지.**
+- **최소 탐지 효과:** n=400 → ~9.9포인트. n=250 → ~12.5. n=180 → ~14.8. writeup에 이것을 명시하십시오.
 
 ---
 
-## GO / NO-GO summary table
+## 지표 — 전체 정의
 
-| Gate | Cost | GO | NO-GO / KILL | Verdict on NO-GO |
+**주 지표**
+1. **작업 성공** — 이진, 사전 정의된 기준, 조건을 모르는 평가자가 비디오로 판정.
+2. **진행 점수** — 사전 정의된 subgoal에 대한 부분 점수 (파지 달성 / 들어올림 / 운반 / 배치). 이 효과 크기에서 성공률만으로는 정책이 구분되지 않습니다.
+
+**제어·타이밍** (매 사이클 로깅; 분포로 보고, 절대 평균 금지)
+3. **달성 제어 rate** — 서보 입력 기준 명령/초, p50과 p5 (최악 지속).
+4. **End-to-end latency** — photon(카메라 타임스탬프) → 서보의 관절 명령. **p50 / p95 / p99 / max** 보고.
+5. **Jitter 비율** — p99/p50. 건강한 edge 스택은 Jetson 참조값처럼 보입니다: 평균 150.5ms, **표준편차 0.13ms**, 범위 150.4–151.0. 당신 것이 >2×라면 모델 문제가 아니라 스케줄링/경합 문제입니다.
+6. **인터페이스 staleness** — Model B가 소비하는 순간의 Model A 출력 나이. p50/p99.
+7. **Queue underrun 비율** — 행동이 없는 제어 사이클의 비율.
+
+**물리 정확도**
+8. **포즈 추종 오차** — ‖달성 EE 포즈 − 명령 목표‖: 병진(mm)과 회전(deg), RMS와 p95, *task phase별로 따로*(자유공간 접근 vs 접촉).
+9. **인터페이스 오차** — ‖A의 예측 포즈 − hindsight 정답 포즈‖. **시스템 전체에서 가장 진단적인 단일 수치입니다.**
+10. **최종 배치 오차** — 최종 물체 포즈 vs 목표 포즈.
+11. **경로 smoothness** — RMS 관절 jerk; 관절 속도 부호 반전 횟수 (IK branch-flipping과 chunk 경계 불연속을 잡음).
+
+**접촉**
+12. **접촉 phase 중 피크 접촉력/wrench** (F/T 센서, 시뮬은 MuJoCo contact force, 또는 프록시로 모터 전류).
+13. **지속 접촉 중 RMS 접촉력** (닦기, 삽입).
+14. **Jam/stall 비율** — 전류 한계나 힘 임계값으로 종료된 에피소드.
+
+**강건성**
+15. **복구율** — 스크립트 교란 후 성공, 교란 전 정상 궤도 조건부. 교란 종류·크기별 보고.
+16. **복구 시간.**
+17. **Livelock 비율** — 같은 실패 행동이 ≥3회 반복되는 에피소드 (빠진 전환/종료 정책이 드러나는 곳).
+
+**일반화** — E2d의 7개 축 각각의 성공률, 따로 보고, 그리고 귀속으로서 축별 `C6 − C4` oracle 격차.
+
+**표본 효율**
+18. N ∈ {10, 25, 50, 100, 200}에서의 **성공률 vs N 데모** 곡선과 **교차점 N*** (분리가 단일을 추월하는 데모 수 — 있다면). 분리가 큰 N에서만 이긴다면, 그것은 당신이 원했던 표본 효율 스토리가 아닙니다.
+
+**안전/liveness** (100 rollout당)
+19. 관절 한계 트립 · 속도 클램프 트립 · IK-infeasible 거부 · 작업공간 경계 거부 · finite/범위 거부 · watchdog 트립 · 인간 개입.
+
+**귀속**
+20. **Oracle 격차** `C6 − C4` — 남은 오차 중 Model A 소유 비율.
+21. **고전 격차** `C7 − C4` — 학습된 Model B의 가치가 얼마나 되는가 (또는 얼마나 안 되는가).
+
+---
+
+## GO / NO-GO 요약표
+
+| 게이트 | 비용 | GO | NO-GO / KILL | NO-GO 시 판정 |
 |---|---|---|---|---|
-| **P1 hardware** | 30 min | Torque/impedance interface exists | Position-only arm | Compliance justification void; restrict tasks to free-space, in writing |
-| **P2 concurrency** | 2 h | Fast loop p99 < 50 ms under contention | Fast loop p99 > 150 ms | H2 dead on this box; strip RGB from B or move B to ANE |
-| **E0 ceiling** | 3–5 d | `C6 − C0 ≥ +10` | `C6 − C0 ≤ +5` or CI∋0 | **KILL H1.** Ceiling below monolith; no Model A can rescue it |
-| **E0 IK** | (same) | `C6 − C8 ≥ +5` | `C8 ≥ C6 − 5` | **KILL MODEL B.** Ship A + TRAC-IK/OSC |
-| **E1 ladder** | 2–3 wk | `C5 − max(C0,C1,C2,C7) ≥ +8` on ≥3/4 suites | `C1 ≥ C5 − 3` | Benefit was the training signal → ship the auxiliary-head monolith |
-| | | | `C7 ≥ C5 − 3` | Model B unnecessary |
-| | | | Advantage vanishes at pretrained init | You measured pretraining |
-| | | | Advantage vanishes at matched rate | You measured latency → async chunking, ~50 lines |
-| | | | `C3 ≥ C5 + 8` | Separate training is the defect → joint training or frozen-A + pre-aligned projector |
-| **E2a dynamic** | 1 wk | Split advantage grows with object speed | Flat in speed | H2 dead; the split isn't buying reactivity |
-| **E2c data** | 2 wk | `C4+ARM − C4 ≥ +15` while `C0+ARM − C0 < +5` | Both gain equally | The monolith absorbs the extra data too; H3 doesn't need a split |
-| **E3 rate** | 1 wk | Split ≥2× mono effective rate, fast-loop p99 <50 ms | Mono+chunking hits ≥30 Hz | **KILL H2.** Delete the latency justification |
-| **E4 pilot** | 3–4 wk | Clean instrumentation, <1 safety trip / 100 rollouts | Repeated staleness/frame/NaN faults | Fix systems before spending on E5 |
-| **E5 powered** | 4–6 wk | `C5 − best control ≥ +15` at n=400/arm, Bonferroni-corrected | `< +15` or CI∋0 | Underpowered to distinguish; report the tie honestly |
+| **P1 하드웨어** | 30분 | 토크/impedance 인터페이스 존재 | 위치 전용 팔 | compliance 정당화 무효; 작업을 자유공간으로 서면 한정 |
+| **P2 동시성** | 2h | 경합 하 빠른 루프 p99 < 50ms | 빠른 루프 p99 > 150ms | 이 기기에서 H2 사망; B에서 RGB를 빼거나 B를 ANE로 |
+| **E0 천장** | 3–5일 | `C6 − C0 ≥ +10` | `C6 − C0 ≤ +5` 또는 CI∋0 | **H1 사망.** 천장이 monolith 아래; 어떤 Model A도 구제 불가 |
+| **E0 IK** | (동일) | `C6 − C8 ≥ +5` | `C8 ≥ C6 − 5` | **Model B 사망.** A + TRAC-IK/OSC 출하 |
+| **E1 사다리** | 2–3주 | `C5 − max(C0,C1,C2,C7) ≥ +8` (≥3/4 스위트) | `C1 ≥ C5 − 3` | 이득은 학습 신호였음 → auxiliary-head monolith 출하 |
+| | | | `C7 ≥ C5 − 3` | Model B 불필요 |
+| | | | pretrained init에서 우위 소멸 | pretraining을 측정한 것 |
+| | | | rate 일치 시 우위 소멸 | latency를 측정한 것 → async chunking, ~50줄 |
+| | | | `C3 ≥ C5 + 8` | 분리 학습이 결함 → joint 학습 또는 동결-A + 사전정렬 projector |
+| **E2a 동적** | 1주 | 분리 우위가 물체 속도에 따라 증가 | 속도에 평평 | H2 사망; 분리는 반응성을 사주지 않음 |
+| **E2c 데이터** | 2주 | `C4+ARM − C4 ≥ +15` 이면서 `C0+ARM − C0 < +5` | 둘 다 동등하게 이득 | monolith도 추가 데이터를 흡수함; H3에 분리가 필요 없음 |
+| **E3 rate** | 1주 | 분리가 단일 유효 rate의 ≥2배, 빠른 루프 p99 <50ms | 단일+chunking이 ≥30Hz 달성 | **H2 사망.** latency 정당화 삭제 |
+| **E4 파일럿** | 3–4주 | 깨끗한 계측, 안전 트립 <1 / 100 rollout | staleness/프레임/NaN 반복 결함 | E5에 돈 쓰기 전에 시스템부터 수리 |
+| **E5 검정력** | 4–6주 | `C5 − 최선 대조군 ≥ +15` (n=400/arm, Bonferroni 보정) | `< +15` 또는 CI∋0 | 구분에 검정력 미달; 동률을 정직하게 보고 |
 
-**Secondary gates at E5 (any failure → investigate before declaring GO):** pose tracking p95 ≤ 5 mm / 3°; safety trips ≤ 1 per 100 rollouts; interface staleness p99 ≤ 100 ms; recovery rate from 5 cm nudge ≥ 50% and strictly > monolith.
-
----
-
-## What to build instead, on each NO-GO
-
-These are not consolation prizes — several are better projects than the one you proposed.
-
-1. **`C1` wins → the auxiliary-head monolith.** One model, one forward pass, target-pose prediction as an auxiliary loss. Half the latency, no interface, no covariate shift, no second dataset, no MLX queue contention. This was π0.5's own second-best configuration and the authors' conclusion was verbatim that *"a significant portion of that benefit is already obtained simply by including subtask prediction data in the training mixture."*
-
-2. **`C7` wins → learned A + TRAC-IK + Cartesian impedance.** Zero learned parameters below the pose. Ships in a weekend. TRAC-IK: >99.8% query success, sub-millisecond, versus a learned pose→joint map at mm-to-cm error and 3 orders of magnitude slower — and IK returns a *typed infeasibility signal* ("no solution", "at joint limit", "near singularity") that a regression network structurally cannot produce. This is what every deployed VLA (OpenVLA, π0, RT-2) actually does.
-
-3. **H2 dead → async chunked monolith.** LeRobot's PolicyServer/RobotClient with `chunk_size_threshold ≈ 0.6` and weighted-average temporal ensembling, plus Real-Time Chunking for smooth chunk boundaries. Equal success, ~30% faster completion, 2× throughput, no retraining. Chunk length is nearly free (5→250 actions costs ~11% end-to-end latency) while denoising steps are expensive (10→50 costs 5×) — so use long chunks and few flow-matching steps, and never an autoregressive token action head (102× penalty).
-
-4. **H3 confirmed → keep the split, but for the right reason and in the right shape.** Lopsided (A ≫ B; Helix is 7B/80M, RoboDual 7B/20M trainable — *nobody splits 50/50*), pretrained frozen high level, chunk-wise SE(3) **delta** with 6D rotation + gripper + duration + (7-DoF) swivel angle + compliance flag, delivered to B as a **rendered image-plane heatmap** rather than a raw vector, and fed by cheap non-teleop supervision. Model B as a **clamped residual** on TRAC-IK+impedance, so residual→0 recovers a working classical stack.
-
-5. **H4 confirmed → ship the interface as the product.** Pose targets are inspectable in RViz, correctable with a 6-DoF mouse, unit-testable, and loggable. RT-H's largest single number was human correction (40% → 63%, beating IWR by 50%), not the hierarchy itself. If your deliverable is a debuggable, human-in-the-loop-correctable robot, the pose interface earns its keep even at zero success-rate gain — and you'll have measured that honestly rather than claimed it.
+**E5의 보조 게이트 (하나라도 실패 → GO 선언 전 조사):** 포즈 추종 p95 ≤ 5mm / 3°; 안전 트립 ≤ 1 / 100 rollout; 인터페이스 staleness p99 ≤ 100ms; 5cm 밀기로부터의 복구율 ≥ 50% 그리고 monolith보다 엄격히 우세.
 
 ---
 
-## Total budget
+## 각 NO-GO에서 대신 만들 것
 
-| | Wall-clock | Compute | Teleop | Money |
+위로상이 아닙니다 — 몇 개는 제안하신 것보다 더 나은 프로젝트입니다.
+
+1. **`C1` 승리 → auxiliary-head monolith.** 모델 1개, forward 1회, 목표 포즈 예측을 auxiliary loss로. latency 절반, 인터페이스 없음, covariate shift 없음, 두 번째 데이터셋 없음, MLX queue 경합 없음. π0.5 자신의 2위 구성이었고 저자들의 결론은 원문 그대로 *"a significant portion of that benefit is already obtained simply by including subtask prediction data in the training mixture"* 입니다.
+
+2. **`C7` 승리 → 학습된 A + TRAC-IK + Cartesian impedance.** 포즈 아래로 학습 파라미터 0개. 주말에 출하. TRAC-IK: 질의 성공률 >99.8%, 서브밀리초 — mm~cm 오차에 3자릿수 느린 학습된 pose→joint 맵과 대비. 그리고 IK는 회귀 네트워크가 구조적으로 만들 수 없는 *타입 있는 infeasibility 신호*("no solution", "at joint limit", "near singularity")를 반환합니다. **모든 배포된 VLA(OpenVLA, π0, RT-2)가 실제로 하는 방식입니다.**
+
+3. **H2 사망 → async chunked monolith.** LeRobot의 PolicyServer/RobotClient (`chunk_size_threshold ≈ 0.6`) + 가중 평균 temporal ensembling + 매끄러운 chunk 경계를 위한 Real-Time Chunking. 동일 성공률, 완료 ~30% 단축, 처리량 2배, 재학습 없음. chunk 길이는 거의 공짜이고(5→250 행동이 end-to-end latency ~11% 비용) denoising 스텝은 비쌉니다(10→50이 5배) — **긴 chunk + 적은 flow-matching 스텝, 그리고 autoregressive 토큰 action head는 절대 금지(102배 페널티).**
+
+4. **H3 확인 → 분리를 유지하되, 올바른 이유로, 올바른 형태로.** 비대칭하게(A ≫ B; Helix는 7B/80M, RoboDual은 7B/학습 가능 20M — *아무도 50/50으로 나누지 않습니다*), 사전학습 동결 상위, chunk 단위 SE(3) **delta** + 6D rotation + 그리퍼 + duration + (7-DoF면) swivel angle + compliance 플래그, B에는 맨 벡터가 아니라 **이미지 평면에 렌더링한 heatmap**으로 전달, 그리고 값싼 비텔레옵 supervision으로 공급. Model B는 TRAC-IK+impedance 위의 **클램프된 residual**로 — residual→0이면 작동하는 고전 스택이 복원되도록.
+
+5. **H4 확인 → 인터페이스 자체를 제품으로 출하.** 포즈 목표는 RViz에서 검사 가능하고, 6-DoF 마우스로 교정 가능하고, 유닛테스트 가능하고, 로깅 가능합니다. RT-H의 최대 단일 수치는 계층 자체가 아니라 사람 교정(40% → 63%, IWR 대비 50% 우세)이었습니다. 결과물이 디버깅 가능하고 human-in-the-loop 교정 가능한 로봇이라면, 성공률 이득이 0이어도 포즈 인터페이스는 제 몫을 합니다 — 그리고 당신은 그것을 주장이 아니라 정직한 측정으로 갖게 됩니다.
+
+---
+
+## 총예산
+
+| | 시간 | 연산 | 텔레옵 | 비용 |
 |---|---|---|---|---|
-| Pre-flight | 1 day | laptop | 0 | $0 |
-| **E0 (the kill-shot)** | **3–5 days** | **laptop** | **0** | **$0** |
-| E1 | 2–3 weeks | rented 4090/A100 spot | 0 | $100–250 |
-| E2 | 2–3 weeks | rented GPU | 0 (+3 h annotation) | $100–200 |
-| E3 | 1 week | target hardware | 0 | $0 |
-| E4 | 3–4 weeks | laptop + arm | **250 demos / 6–10 h** | $400 (SO-101 pair) |
-| E5 | 4–6 weeks | laptop + arm | 0 new | $0 |
+| 사전 점검 | 1일 | 노트북 | 0 | $0 |
+| **E0 (킬샷)** | **3–5일** | **노트북** | **0** | **$0** |
+| E1 | 2–3주 | 4090/A100 spot 대여 | 0 | $100–250 |
+| E2 | 2–3주 | 대여 GPU | 0 (+주석 3h) | $100–200 |
+| E3 | 1주 | 대상 하드웨어 | 0 | $0 |
+| E4 | 3–4주 | 노트북 + 팔 | **250 데모 / 6–10h** | $400 (SO-101 페어) |
+| E5 | 4–6주 | 노트북 + 팔 | 새 데모 0 | $0 |
 
-**You can falsify the central claim for $0 in under a week.** Everything after E0 is contingent on E0 passing, and E0 tests the *ceiling*, so a negative there is not rescuable by more data, a better Model A, or a bigger budget. That is the entire point of running it first.
+**핵심 주장을 $0으로, 일주일 안에 반증할 수 있습니다.** E0 이후의 모든 것은 E0 통과에 조건부이고, E0는 *천장*을 검증하므로 거기서의 음성 결과는 더 많은 데이터로도, 더 나은 Model A로도, 더 큰 예산으로도 구제되지 않습니다. **그것이 이것을 가장 먼저 돌리는 이유의 전부입니다.**
