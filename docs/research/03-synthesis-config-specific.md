@@ -1,99 +1,101 @@
-# Bimanual "Cerebrum/Cerebellum" Split — Decision-Ready Architecture Synthesis
+# 양팔(Bimanual) "대뇌/소뇌" 분리 — 의사결정용 아키텍처 종합
 
-**Bottom line up front.** The instinct to split is right. The proposed *implementation* of the split is wrong in three specific, independently fatal ways: (a) the interface is two independent 6-DoF poses, (b) Model B consumes RGB, (c) the split is justified by capacity. Keep the functional decomposition; change the seam, the interface, the supervision, and the justification. Separately — and this is the constraint that should reorder your quarter — the Mac mini is a good development box and an indefensible product computer, and the "both models must run locally on the Mac mini" premise is silently doing more damage to the design than any ML choice in the plan.
+> **[안내]** 이 문서는 Galbot G1·RTX 3090 확정 이전에 작성되었습니다. 인터페이스 스펙·데이터 계획·GATE 설계는 여전히 유효하지만, 컴퓨트 토폴로지(Mac mini 추론 호스트, Jetson 제품 컴퓨트 권고)는 REV.2/REV.3이 대체합니다 — SDK가 Linux 전용이라 Mac은 로봇과 통신할 수 없고, 추론은 로봇 탑재 AGX Orin, 학습·시뮬은 3090 박스입니다.
 
-Where the evidence is thin or self-contradictory, it is flagged inline and collected in §10. Read §10 before you quote any number in a board deck.
+**결론부터.** 분리하려는 직관은 옳다. 다만 제안된 분리의 *구현*은 서로 독립적으로 치명적인 세 지점에서 틀렸다: (a) 인터페이스가 두 개의 독립적인 6-DoF 포즈라는 점, (b) Model B가 RGB를 소비한다는 점, (c) 분리를 용량(capacity) 논리로 정당화한다는 점. 기능적 분해는 유지하되, 이음새(seam)·인터페이스·supervision·정당화 논리를 바꿔라. 그리고 별개로 — 이것이 이번 분기의 우선순위를 재편해야 할 제약인데 — Mac mini는 좋은 개발 머신이지만 제품 컴퓨터로는 방어 불가능하며, "두 모델 모두 Mac mini에서 로컬로 돌아야 한다"는 전제가 계획의 그 어떤 ML 선택보다 조용히 더 큰 피해를 설계에 입히고 있다.
 
----
-
-## 1. How each confirmed constraint changes the verdict
-
-The four constraints do not point the same direction. Two argue for the split, two argue against the split *as specified*, and the commercialization lens produces the strongest pro-split arguments in the whole analysis — arguments a pure-ML reviewer would never generate.
-
-### 1.1 BIMANUAL — argues FOR splitting capacity, hard AGAINST the pose interface
-
-**For the split (structural, empirical):** Decoupled per-arm heads beat a monolithic 14-DoF head: 42.6% → 62.4% average. Adding cross-arm interaction modules adds another +16.5 pp → 78.9% (DP3 baseline 55.4%). RDT-1B names the underlying reason: doubling the action space raises the multimodality of the feasible-action distribution. So "give each part of the problem its own capacity" has real backing — *at the network level*.
-
-**Against the interface (geometric, not tunable):** When both grippers rigidly hold one object, `T_left⁻¹ · T_right` is fixed. That is 6 holonomic constraint equations. Two independent 6-DoF pose targets span 12 DoF; 6 of them cannot move the object and can only become internal wrench. No amount of training data makes two independently-regressed poses satisfy a 6-equation constraint to rigid-grasp tolerance. On compliant low-cost arms (~10²–10³ N/m Cartesian stiffness) a 5 mm relative error is 0.5–5 N — the object slips. On stiff cobots (~10⁴–10⁵ N/m) the same 5 mm is 50–500 N — the object is crushed and you take a protective stop. *(Force magnitudes are estimated from stiffness ranges, not measured — see §10.)*
-
-**Against, empirically:** PerAct2 is the closest published instantiation of Model A's proposed output — per-arm 6-DoF pose + gripper flag, realized by a motion planner. Average 16.8% over 13 bimanual tasks; push box 6%, handover 11%, plate pickup 4%. ALOHA-lineage joint-space systems on comparable real tasks sit at 70–95%. The comparison is confounded (keyframes, sim, planner) but the burden of proof is clearly on the split.
-
-**Against, informationally:** Inter-gripper relative pose is the single highest-value bimanual input measured anywhere in this research — UMI cloth folding 70% with it vs 30% without, from one extra 6-D vector. Two independently predicted absolute poses subtracted together *compound both arms' errors into exactly the quantity the closed chain is most sensitive to*.
-
-**Against, temporally:** One model emitting one chunk containing both arms guarantees synchronization by construction. Split the arms and you must re-create it. UMI latency matching moved dynamic tossing 57.5% → 87.5%. InterACT's cross-segment ablation dropped slot insertion 44% → 24%.
-
-> **Verdict shift:** bimanual turns "split the model" from neutral to positive, and turns "per-arm independent pose interface" from plausible to disqualified.
-
-### 1.2 MAC MINI — argues FOR a rate/horizon split, hard AGAINST two image-consuming models
-
-**Against, decisively:** Model B as specified consumes RGB. With 2 cameras that is **four vision-encoder passes per control step** — ~1.0 TFLOP ≈ 200 ms on M4 Pro's ~5.1 TFLOPS effective, a ~5 Hz hard ceiling from that line item alone. Every system that works (π0, GR00T N1, Helix, RDT) shares **one** backbone forward pass between the slow and fast halves via a shared KV cache. Your split takes the single most expensive component and computes it twice. Shared-backbone alternative: ~100 ms → 8–12 Hz. That is 2× for free.
-
-**Against, at the runtime level:** Metal has no compute preemption and no stream priority. Command buffers execute to completion. Two models on one GPU each get roughly 45–50% of solo throughput, plus jitter equal to the other's longest command buffer. A separate bandwidth-only ceiling: A(2B@8-bit) + B(1B@8-bit) = 3 GB read per step ÷ 190 GB/s effective = 63 Hz *ignoring* activations, images, and KV. Real-world ≈ 1/3 of that. *(Derived from Metal's documented execution model, not measured on your workload — benchmark it in week one; this is the single highest-value measurement available to you.)*
-
-**Against, at the OS level:** macOS has no PREEMPT_RT, no `isolcpus`, no cpusets, no `chrt`, no SCHED_FIFO, no core shielding. Mach `THREAD_TIME_CONSTRAINT_POLICY` is the only mechanism and it is soft. Realistic periodic-thread jitter: p50 50–200 µs, p99 1–3 ms, **p99.9 10–50 ms**. A 100 Hz loop with a 50 ms stall has missed five consecutive cycles. A hard ≥100 Hz joint loop on macOS is not defensible and cannot be engineered around — the kernel facilities do not exist.
-
-**For the split:** the Helix/GR00T *rate* split maps cleanly onto this box — slow semantic model at 1–5 Hz, fast chunk policy at 5–10 Hz emitting 1–2 s of 50 Hz trajectory. But note the honest catch: on **one** chip you do not gain throughput from a rate split, because both models share one bandwidth pool. You gain a *bounded fast loop* only if the fast model is genuinely tiny (<50M), pixel-free, and lives on CPU or ANE. MLX will never target the ANE (issue #18, wontfix), so that path is Core ML, with all its silent-fallback pain.
-
-> **Verdict shift:** Mac mini kills "two RGB-consuming transformers." It supports "one shared backbone, two heads, one KV cache," and it forces the real split to be *inference host / real-time controller*, not *Model A / Model B*.
-
-### 1.3 SELF-COLLECTED TELEOP DATA — the strongest argument FOR the split, and the source of the plan's most dangerous flaw
-
-**For, strongly (this should be your headline justification):** Model A can absorb data Model B cannot — simulation, cross-embodiment, human video, procedurally randomized scenes — while only Model B needs your scarce, expensive, on-robot bimanual demos. This is a genuinely good reason to split and it is *better than the capacity argument*, which has no support anywhere in the literature. Anchors: ALOHA Unleashed needed 26,000+ real episodes / 35 operators / 10 robots / 8 months for 70–75% on shirt hanging. Mobile ALOHA got away with 50 demos/task **only** because it co-trained with 825 static demos, worth up to +90 pp. RoboTwin hard setting: from-scratch small policies collapse to 1–2%. You cannot out-collect this; you can only reuse.
-
-**Against, and this is the killer:** if the "desired EE pose" label is `FK(q_{t+k})` computed from the same teleop joint trajectory, it is an **invertible function of the very joint targets Model B must output**. Two failures follow. (1) *Label leakage:* `(q_t, FK(q_{t+k})) → q_{t+k}` is solvable in closed form with zero reference to the image. Model B will learn the IK shortcut and ignore RGB, because that minimizes training loss fastest — textbook causal confusion. At test time, when Model A's pose is imperfect and vision is the only corrective signal, Model B has no learned pathway to use it. (2) *Support mismatch from step one:* Model B only ever trains on poses that are exactly reachable and exactly kinematically consistent; at test it sees Model A's slightly-unreachable, slightly-off-manifold approximations. It is OOD on the first control step and the error compounds.
-
-**Corollary that must be said out loud:** if the interface is a metric EE pose, the exact solution already exists — LeRobot ships `InverseKinematicsEEToJoints`; a bimanual differential-IK QP (Pinocchio + OSQP, or mink) solves it in 0.2–1 ms at 500–1000 Hz with joint limits, self-collision and singularity handling you can certify. Spending model capacity to approximate a function you can compute exactly is a **capacity loss, not a capacity split**. A learned Model B earns its keep only if it has information IK does not: contact compliance, force regulation, human-like redundancy resolution, dynamic feasibility under load. None of those are in a default LeRobot dataset — SO-101 and ALOHA are position-controlled with no F/T channel and no torque/current logged by default.
-
-**Also for the split, on the labeling side:** ALOHA's decisive trick — record the **leader** arm's joint positions as the action, not the follower's — makes applied force implicitly encoded as `Kp · (q_leader − q_follower)`. That is a free, zero-sensor impedance channel the human modulates unconsciously, and it is what makes contact-rich work without F/T sensors. Getting this wrong at collection time is **unrecoverable**. A 6-DoF pose interface throws this channel away, because Model B will correctly drive pose error to zero, which drives applied force to zero.
-
-> **Verdict shift:** data argues for the split at the *training-source* level and against it at the *supervision* level. Both must be honored simultaneously.
-
-### 1.4 COMMERCIALIZATION — gives the best pro-split arguments and the harshest anti-Mac verdict
-
-**Strong FOR — independent update cadence.** This is the single best commercial argument for the split and it is not an ML argument. Regression-testing a contact-level controller on real hardware is expensive and slow; regression-testing a planner is largely offline. Shipping a new task vocabulary without re-validating the layer that touches the object is enormous operational leverage. **Caveat: this only holds if the interface is FROZEN and VERSIONED.** The moment you change the pose representation, both layers need revalidation and the benefit evaporates.
-
-**Strong FOR — per-customer finetuning.** Finetune only the high level on customer-specific task sequences and vocabulary; keep the validated low level fixed. This is a deployment-velocity *and* liability win, and it maps to how Chef and Ambi actually productize (skill libraries over a fixed motion stack). Economics: a LoRA finetune run is ~$50–150 of cloud GPU.
-
-**Strong FOR — a validated, frozen low level is the object your safety case can point at.** A layer with a stable interface, a bounded output space, and a fixed validation suite is something you can put in a technical file. A monolith that changes wholesale every release is not.
-
-**MEDIUM FOR — field debuggability.** Real value, but you get ~90% of it from *logging the intermediate representation*, not from separate weights. π0.5/π0.7 emit language subtasks and visual subgoals precisely for this.
-
-**Strong AGAINST — the commercial metric is MTBI, not success rate, and the split as proposed adds a failure surface without adding recovery.** DYNA-1: 99.4% success, 700–800 napkins in 24 h, **zero interventions**, accepted at only 60% of human throughput *because* it ran unattended. Their named competitor failure mode: "unrecoverable errors after an hour or two." Meanwhile 0.95¹⁰ ≈ 0.60 — to hit 99% on a 10-step bimanual task you need 99.9% per step. Parameter reallocation does not change that exponent; error detection and recovery does. A split whose high level cannot say "I am stuck, re-approach" is commercially worthless regardless of its MSE.
-
-**Strong AGAINST — imitation alone does not reach the bar.** π0.6 out-of-box fully assembles a box **20%** of the time. π*0.6 with Recap (RL on real autonomous experience + a value function) took espresso, laundry and box assembly all to >90% and more than doubled throughput. The last 20→90% was bought with a self-improvement loop, not a better decomposition. Plan for your pure-teleop-imitation stack to land in the 20–80% band.
-
-**Disqualifying AGAINST — Mac mini as product compute.** Not a close call, and it fails on at least six independent grounds: macOS SLA §8E explicitly disclaims suitability where "failure or time delays… could lead to death, personal injury"; §2J forbids redistribution/sublicensing and there is no OEM/embedded program; 10–35 °C, unfiltered intake, no vibe/shock rating, AC-mains only; no PREEMPT_RT; ROS 2 lists macOS as **Tier 3, amd64 only** (Apple Silicon is not a listed target at all); no BMC/IPMI, no serial console, no userspace watchdog, MDM update deferral capped at 90 days; and no lifecycle commitment, no PCN, no last-time-buy — the 64 GB M4 Pro SKU **was discontinued in June 2026 mid-cycle with no notice**. Jetson AGX Thor matches the M4 Pro's 273 GB/s with 128 GB and vastly more compute, at comparable price, on a ROS 2 Tier 1 platform with an RT kernel and DC input. AGX Orin 64 GB is committed to production through Jan 2032.
-
-**Also AGAINST — two arguments you should delete from the pitch.** *Per-embodiment low-level swap:* π0.7 did laundry folding zero-shot on a bimanual UR5e with no training data for that task on that hardware. The industry solved cross-embodiment with co-training + control-modality metadata inside one model, not a swappable module. *Smaller OTA:* two models with two encoders is **bigger**, and you now ship a compatibility matrix. One base + per-customer LoRA is the real answer. A technical DD reviewer who knows π0.7 will mark both as stale.
-
-**Hard AGAINST any learned layer in the safety path.** ISO 10218-1/-2:2025 (published 2025, ISO/TS 15066 fully absorbed into -2, harmonised to ISO 13849-1:2023 PL and IEC 62061:2021 SIL) require quantified dangerous-failure rate, diagnostic coverage, and validated systematic capability *per safety function*. A stochastic, non-exhaustively-testable policy demonstrates none of these. *(No standard says "a neural network cannot implement a safety function" in those words — this is an inference from the PL/SIL requirements plus industry commentary. It is the correct working assumption; it is not a quotation.)*
+근거가 얇거나 자기모순인 지점은 본문에 표시해 두었고 §10에 모아 두었다. 이사회 자료에서 어떤 숫자든 인용하기 전에 §10을 먼저 읽어라.
 
 ---
 
-## 2. The single most dangerous assumption
+## 1. 확정된 각 제약이 판정을 어떻게 바꾸는가
 
-> **That the A→B interface can be supervised from the data they are about to collect.**
+네 가지 제약은 같은 방향을 가리키지 않는다. 둘은 분리에 찬성하고, 둘은 *명세된 그대로의* 분리에 반대하며, 사업화 관점은 이 분석 전체에서 가장 강력한 분리 찬성 논거를 만들어 낸다 — 순수 ML 리뷰어라면 결코 만들어 내지 못할 논거다.
 
-Concretely: the assumption that "we'll collect teleop, compute EE pose by forward kinematics, and train Model B to map (pose target, joints, image) → joint commands."
+### 1.1 양팔(BIMANUAL) — 용량 분리에는 찬성, 포즈 인터페이스에는 강경 반대
 
-Why this is the most dangerous, above all other flaws in the plan:
+**분리 찬성 (구조적, 경험적):** 팔별로 분리된 head가 monolithic 14-DoF head를 이긴다: 평균 42.6% → 62.4%. 팔 간 상호작용 모듈을 더하면 +16.5pp가 추가되어 78.9%가 된다(DP3 baseline 55.4%). RDT-1B는 그 근본 이유를 지목한다: 액션 공간이 두 배가 되면 실행 가능한 액션 분포의 다중양상성(multimodality)이 커진다. 따라서 "문제의 각 부분에 자기 용량을 주자"에는 실제 근거가 있다 — *네트워크 수준에서는*.
 
-1. **It is silent.** Training loss will be excellent. Validation loss will be excellent. Sim will likely look fine, because in sim the poses are exact by construction and calibration error is zero. The failure appears only on hardware, under Model A's real error, months later.
-2. **It inverts the plan's own goal.** Model B will learn analytic IK — a function you already have exactly, faster, deterministically, and certifiably. You will have spent your scarcest resource (on-robot bimanual demos) and your scarcest compute (48 GB unified memory) buying a worse version of `InverseKinematicsEEToJoints`. That is not splitting capacity; that is destroying it.
-3. **It is unrecoverable at collection time.** The fix requires an *independently measured* EE pose channel (VR/AVP hand tracking logged as its own feature, wrist AprilTags, or mocap) and a *servo current/torque* channel. Both are decided before episode 1 and cannot be reconstructed from an existing dataset. Everything else in this plan can be redone; this one cannot.
-4. **It compounds.** Model B trains only on exactly-reachable, exactly-consistent, on-manifold poses. At deployment it is out of distribution on the **first control step**, and every subsequent step is conditioned on a state the demonstrations never covered. This is the classic cascaded shift, and it is what HIRO's off-policy correction exists to fix in the RL setting.
+**인터페이스 반대 (기하학적이며, 튜닝으로 해결 불가):** 양쪽 그리퍼가 하나의 물체를 단단히 잡고 있으면 `T_left⁻¹ · T_right`는 고정된다. 이는 6개의 홀로노믹 구속 방정식이다. 독립적인 6-DoF 포즈 목표 두 개는 12 DoF를 스팬하고, 그중 6개는 물체를 움직일 수 없으며 오직 internal wrench로만 변할 수 있다. 아무리 학습 데이터를 부어도, 독립적으로 회귀된 두 포즈가 6개 방정식의 구속을 강체 파지 허용오차 수준으로 만족하게 만들 수는 없다. 컴플라이언트한 저가 팔(Cartesian stiffness ~10²–10³ N/m)에서 5 mm 상대 오차는 0.5–5 N이다 — 물체가 미끄러진다. 강성이 높은 협동로봇(~10⁴–10⁵ N/m)에서는 같은 5 mm가 50–500 N이다 — 물체가 으스러지고 보호 정지(protective stop)를 맞는다. *(힘 크기는 stiffness 범위에서 추정한 것이지 측정치가 아니다 — §10 참조.)*
 
-**Two cheap diagnostics that settle it in an afternoon, before you build anything:**
-- *Ablation test:* train Model B, then zero out or batch-shuffle its RGB input. If validation loss barely moves, Model B is an IK solver and the split has bought you nothing. **Pass criterion: ablating vision must cost ≥20 pp of rollout success.**
-- *Perturbation test:* inject 5–20 mm / 2–5° of noise into Model B's input pose — Model A's realistic error magnitude — and measure joint-command degradation. This is the true test-time regime; validation loss on FK labels systematically overstates it.
+**경험적 반대:** PerAct2는 Model A가 제안한 출력의 가장 가까운 공개 구현체다 — 팔별 6-DoF 포즈 + 그리퍼 플래그를 모션 플래너로 실행한다. 13개 양팔 태스크 평균 16.8%; 박스 밀기 6%, 핸드오버 11%, 접시 집기 4%. 비교 가능한 실제 태스크에서 ALOHA 계열 관절 공간 시스템은 70–95%에 있다. 이 비교에는 교란 요인이 있지만(키프레임, 시뮬, 플래너) 입증 책임은 명백히 분리 쪽에 있다.
 
-**Runners-up, named honestly.** *Most likely to be false:* "splitting capacity across two models improves performance." I found **no evidence for this anywhere** — Helix, GR00T N1 and π0.5 all split explicitly for inference *rate* and data *reuse*, and none claims a capacity-partitioning benefit. It is the one part of the proposal with zero support. *Most expensive:* "the product ships on a Mac mini."
+**정보 관점의 반대:** 그리퍼 간 상대 포즈는 이 리서치 전체에서 측정된 것 중 가장 가치가 높은 양팔 입력이다 — UMI 천 접기에서 이것이 있으면 70%, 없으면 30%, 추가 6-D 벡터 하나로. 독립적으로 예측한 절대 포즈 두 개를 빼서 만들면 *두 팔의 오차가 정확히 폐체인(closed chain)이 가장 민감한 그 양으로 합성된다*.
+
+**시간 축의 반대:** 한 모델이 양팔을 담은 chunk 하나를 내보내면 동기화가 구조적으로 보장된다. 팔을 분리하면 그것을 다시 만들어야 한다. UMI의 latency matching은 동적 던지기를 57.5% → 87.5%로 끌어올렸다. InterACT의 cross-segment ablation은 슬롯 삽입을 44% → 24%로 떨어뜨렸다.
+
+> **판정 이동:** 양팔 제약은 "모델을 분리하라"를 중립에서 긍정으로 바꾸고, "팔별 독립 포즈 인터페이스"는 그럴듯함에서 실격으로 바꾼다.
+
+### 1.2 MAC MINI — rate/horizon 분리에는 찬성, 이미지를 소비하는 두 모델에는 강경 반대
+
+**결정적 반대:** 명세된 Model B는 RGB를 소비한다. 카메라 2대면 **제어 스텝당 비전 인코더 forward 4회**다 — 약 1.0 TFLOP ≈ M4 Pro의 유효 ~5.1 TFLOPS 기준 200 ms, 이 항목 하나만으로 ~5 Hz 하드 천장. 작동하는 모든 시스템(π0, GR00T N1, Helix, RDT)은 느린 절반과 빠른 절반이 공유 KV 캐시를 통해 **한 번의** 백본 forward를 공유한다. 이 분리안은 가장 비싼 단일 컴포넌트를 두 번 계산한다. 공유 백본 대안: ~100 ms → 8–12 Hz. 공짜로 2배다.
+
+**런타임 수준의 반대:** Metal에는 컴퓨트 선점(preemption)도 스트림 우선순위도 없다. 커맨드 버퍼는 완료될 때까지 실행된다. 한 GPU에 두 모델을 올리면 각각 단독 처리량의 대략 45–50%를 얻고, 상대 모델의 가장 긴 커맨드 버퍼만큼의 jitter가 더해진다. 별도의 대역폭 전용 상한: A(2B@8-bit) + B(1B@8-bit) = 스텝당 3 GB 읽기 ÷ 유효 190 GB/s = 63 Hz, 활성값·이미지·KV는 *무시하고도*. 실제로는 그 1/3 수준. *(Metal의 문서화된 실행 모델에서 도출한 것으로, 당신의 워크로드에서 측정한 것이 아니다 — 1주차에 벤치마크하라; 지금 할 수 있는 가장 가치 있는 단일 측정이다.)*
+
+**OS 수준의 반대:** macOS에는 PREEMPT_RT도, `isolcpus`도, cpuset도, `chrt`도, SCHED_FIFO도, 코어 실딩도 없다. Mach `THREAD_TIME_CONSTRAINT_POLICY`가 유일한 메커니즘이고 그것도 soft다. 현실적인 주기 스레드 jitter: p50 50–200 µs, p99 1–3 ms, **p99.9 10–50 ms**. 100 Hz 루프에서 50 ms 스톨이면 연속 다섯 사이클을 놓친 것이다. macOS 위의 하드 ≥100 Hz 관절 루프는 방어 불가능하고 엔지니어링으로 우회할 수도 없다 — 커널 기능 자체가 존재하지 않는다.
+
+**분리 찬성:** Helix/GR00T의 *rate* 분리는 이 머신에 깔끔하게 얹힌다 — 느린 시맨틱 모델 1–5 Hz, 빠른 chunk 정책 5–10 Hz로 50 Hz 궤적 1–2초 분량을 방출. 다만 정직한 함정이 있다: **한** 칩 위에서는 rate 분리로 처리량이 늘지 않는다. 두 모델이 하나의 대역폭 풀을 공유하기 때문이다. 얻는 것은 *경계가 보장된 빠른 루프*뿐이며, 그것도 빠른 모델이 진짜로 작고(<50M), 픽셀을 안 보고, CPU나 ANE에 사는 경우에만이다. MLX는 ANE를 영원히 타게팅하지 않는다(issue #18, wontfix). 그 경로는 Core ML이고, 그 silent fallback의 고통을 전부 감수해야 한다.
+
+> **판정 이동:** Mac mini는 "RGB를 소비하는 트랜스포머 두 개"를 죽인다. "공유 백본 하나, head 두 개, KV 캐시 하나"를 지지하며, 진짜 분리가 *Model A / Model B*가 아니라 *추론 호스트 / 실시간 컨트롤러* 사이에 놓이도록 강제한다.
+
+### 1.3 자체 수집 텔레옵 데이터 — 분리 찬성의 최강 논거이자, 계획에서 가장 위험한 결함의 근원
+
+**강한 찬성 (이것이 대표 정당화가 되어야 한다):** Model A는 Model B가 흡수할 수 없는 데이터를 흡수할 수 있다 — 시뮬레이션, cross-embodiment, 사람 비디오, 절차적으로 랜덤화된 장면 — 반면 희소하고 비싼 온로봇 양팔 데모는 Model B에만 필요하다. 이것은 분리의 진짜 좋은 이유이고 *용량 논거보다 낫다*. 용량 논거는 문헌 어디에도 근거가 없다. 앵커: ALOHA Unleashed는 셔츠 걸기 70–75%를 위해 실기체 에피소드 26,000+ / 오퍼레이터 35명 / 로봇 10대 / 8개월이 필요했다. Mobile ALOHA가 태스크당 데모 50개로 버틴 것은 **오직** 정적 데모 825개와 co-training했기 때문이며, 그 가치는 최대 +90pp였다. RoboTwin hard 세팅: from-scratch 소형 정책은 1–2%로 붕괴한다. 이것은 수집으로 이길 수 없다. 재사용으로만 이긴다.
+
+**반대, 그리고 이것이 치명타다:** "원하는 EE 포즈" 레이블이 같은 텔레옵 관절 궤적에서 계산한 `FK(q_{t+k})`라면, 그것은 Model B가 출력해야 할 **바로 그 관절 목표의 가역 함수**다. 두 가지 실패가 따라온다. (1) *Label leakage:* `(q_t, FK(q_{t+k})) → q_{t+k}`는 이미지를 전혀 참조하지 않고 closed-form으로 풀린다. Model B는 IK 지름길을 배우고 RGB를 무시한다. 그것이 학습 손실을 가장 빨리 최소화하기 때문이다 — 교과서적 causal confusion. 테스트 시점에 Model A의 포즈가 불완전하고 비전이 유일한 교정 신호일 때, Model B에는 그것을 쓸 학습된 경로가 없다. (2) *첫 스텝부터의 support 불일치:* Model B는 정확히 도달 가능하고 정확히 기구학적으로 일관된 포즈에서만 학습된다; 테스트에서는 Model A의 약간 도달 불가능하고 약간 manifold를 벗어난 근사를 본다. 첫 제어 스텝부터 OOD이고 오차는 누적된다.
+
+**소리 내어 말해야 할 따름정리:** 인터페이스가 계량적(metric) EE 포즈라면 정확해는 이미 존재한다 — LeRobot은 `InverseKinematicsEEToJoints`를 기본 제공하고, 양팔 differential-IK QP(Pinocchio + OSQP, 또는 mink)는 관절 한계·자기충돌·특이점 처리를 인증 가능한 형태로 갖추고 0.2–1 ms, 500–1000 Hz로 푼다. 정확히 계산할 수 있는 함수를 근사하는 데 모델 용량을 쓰는 것은 **용량 분리가 아니라 용량 손실이다**. 학습된 Model B는 IK가 갖지 못한 정보를 가질 때만 밥값을 한다: 접촉 컴플라이언스, 힘 조절, 사람다운 여유자유도 해소, 부하 하의 동적 실행 가능성. 이 중 어느 것도 기본 LeRobot 데이터셋에는 없다 — SO-101과 ALOHA는 위치 제어이고, F/T 채널이 없으며, 토크/전류도 기본으로는 기록되지 않는다.
+
+**레이블링 측면의 분리 찬성:** ALOHA의 결정적 트릭 — 액션으로 팔로워가 아닌 **리더** 팔의 관절 위치를 기록 — 은 인가된 힘을 `Kp · (q_leader − q_follower)`로 암묵적으로 인코딩한다. 이는 사람이 무의식적으로 조절하는, 센서 없이 공짜로 얻는 임피던스 채널이며, F/T 센서 없이도 접촉 중심 작업이 되는 이유다. 수집 시점에 이것을 틀리면 **복구 불가능하다**. 6-DoF 포즈 인터페이스는 이 채널을 버린다. Model B가 포즈 오차를 충실히 0으로 몰수록 인가 힘도 0으로 가기 때문이다.
+
+> **판정 이동:** 데이터는 *학습 소스* 수준에서는 분리에 찬성하고 *supervision* 수준에서는 반대한다. 둘 다 동시에 존중해야 한다.
+
+### 1.4 사업화(COMMERCIALIZATION) — 최고의 분리 찬성 논거와 가장 가혹한 반(反)Mac 판정을 준다
+
+**강한 찬성 — 독립적인 업데이트 주기.** 분리의 단일 최고 상업 논거이고, ML 논거가 아니다. 접촉 수준 컨트롤러의 회귀 테스트는 실기체에서 비싸고 느리다; 플래너의 회귀 테스트는 대체로 오프라인이다. 물체를 만지는 계층을 재검증하지 않고 새 태스크 어휘를 출시할 수 있다는 것은 막대한 운영 레버리지다. **단서: 인터페이스가 동결(FROZEN)·버저닝(VERSIONED)될 때만 성립한다.** 포즈 표현을 바꾸는 순간 두 계층 모두 재검증이 필요해지고 이점은 증발한다.
+
+**강한 찬성 — 고객별 fine-tuning.** 고객별 태스크 시퀀스와 어휘에 대해 상위 계층만 fine-tuning하고, 검증된 하위 계층은 고정한다. 배포 속도 *및* 책임(liability) 관점의 승리이고, Chef와 Ambi가 실제로 제품화하는 방식(고정된 모션 스택 위의 스킬 라이브러리)과 맞아떨어진다. 경제성: LoRA fine-tuning 1회는 클라우드 GPU 약 $50–150.
+
+**강한 찬성 — 검증되고 동결된 하위 계층은 safety case가 가리킬 수 있는 대상이다.** 안정된 인터페이스, 경계 지어진 출력 공간, 고정된 검증 스위트를 가진 계층은 technical file에 넣을 수 있는 무언가다. 릴리스마다 통째로 바뀌는 monolith는 그렇지 않다.
+
+**중간 찬성 — 현장 디버깅 용이성.** 실제 가치는 있으나, 그 90%는 가중치를 분리하는 데서가 아니라 *중간 표현을 로깅*하는 데서 나온다. π0.5/π0.7이 언어 서브태스크와 시각 서브골을 내보내는 이유가 정확히 이것이다.
+
+**강한 반대 — 상업 지표는 성공률이 아니라 MTBI이고, 제안된 분리는 복구를 더하지 않으면서 실패 표면만 더한다.** DYNA-1: 성공률 99.4%, 24시간에 냅킨 700–800장, **개입 0회**, 사람 처리량의 60%에 불과했는데도 수용됐다 — *무인으로 돌았기 때문*이다. 그들이 지목한 경쟁사 실패 모드: "unrecoverable errors after an hour or two" (한두 시간 뒤의 복구 불가능한 오류). 한편 0.95¹⁰ ≈ 0.60 — 10스텝 양팔 태스크에서 99%를 달성하려면 스텝당 99.9%가 필요하다. 파라미터 재배분은 그 지수를 바꾸지 못한다; 오류 감지와 복구가 바꾼다. 상위 계층이 "막혔다, 재접근하라"를 말할 수 없는 분리는 MSE가 얼마든 상업적으로 무가치하다.
+
+**강한 반대 — 모방만으로는 기준선에 도달하지 못한다.** π0.6은 박스 완전 조립을 out-of-box로는 **20%** 성공한다. Recap(실기체 자율 경험에 대한 RL + 가치 함수)을 더한 π*0.6은 에스프레소·빨래·박스 조립을 모두 >90%로 올리고 처리량을 두 배 이상으로 만들었다. 마지막 20→90%는 더 나은 분해가 아니라 자기개선 루프로 산 것이다. 당신의 순수 텔레옵 모방 스택은 20–80% 구간에 착지한다고 계획하라.
+
+**실격 수준의 반대 — 제품 컴퓨트로서의 Mac mini.** 아슬아슬한 판정이 아니며, 최소 여섯 개의 독립 사유로 탈락한다: macOS SLA §8E는 "failure or time delays… could lead to death, personal injury" (고장이나 지연이 사망·상해로 이어질 수 있는) 상황에의 적합성을 명시적으로 부인한다; §2J는 재배포/서브라이선스를 금지하고 OEM/임베디드 프로그램이 없다; 10–35 °C, 무필터 흡기, 진동/충격 등급 없음, AC 전원 전용; PREEMPT_RT 없음; ROS 2는 macOS를 **Tier 3, amd64 전용**으로만 목록에 올린다(Apple Silicon은 아예 대상이 아니다); BMC/IPMI 없음, 시리얼 콘솔 없음, 유저스페이스 watchdog 없음, MDM 업데이트 유예 최대 90일; 그리고 수명주기 약속도, PCN도, last-time-buy도 없다 — 64 GB M4 Pro SKU는 **2026년 6월, 주기 중간에 예고 없이 단종됐다**. Jetson AGX Thor는 M4 Pro의 273 GB/s에 128 GB와 훨씬 큰 컴퓨트를 비슷한 가격으로 맞추고, ROS 2 Tier 1 플랫폼에 RT 커널과 DC 입력까지 갖췄다. AGX Orin 64 GB는 2032년 1월까지 생산이 약속돼 있다.
+
+**추가 반대 — 피치에서 삭제해야 할 두 논거.** *embodiment별 하위 계층 교체:* π0.7은 해당 하드웨어·태스크의 학습 데이터 없이 양팔 UR5e에서 빨래 개기를 zero-shot으로 해냈다. 업계는 cross-embodiment를 교체형 모듈이 아니라 하나의 모델 안에서 co-training + 제어 modality 메타데이터로 풀었다. *더 작은 OTA:* 인코더 둘 딸린 모델 둘은 **더 크고**, 이제 호환성 매트릭스까지 배포해야 한다. π0.7을 아는 기술 실사(DD) 검토자는 둘 다 낡은 논거로 표시할 것이다.
+
+**안전 경로 내 학습 계층에 대한 강경 반대.** ISO 10218-1/-2:2025(2025년 발행, ISO/TS 15066은 -2에 완전 흡수, ISO 13849-1:2023 PL 및 IEC 62061:2021 SIL과 정합)는 *안전 기능별로* 정량화된 위험 고장률, 진단 커버리지, 검증된 시스템적 능력(systematic capability)을 요구한다. 확률적이고 전수 테스트가 불가능한 정책은 이 중 어느 것도 입증하지 못한다. *(어떤 표준도 "신경망은 안전 기능을 구현할 수 없다"라고 그 문구 그대로 말하지는 않는다 — 이는 PL/SIL 요구사항과 업계 논평에서의 추론이다. 올바른 작업 가정이지만, 인용문은 아니다.)*
 
 ---
 
-## 3. Recommended compute topology
+## 2. 가장 위험한 단일 가정
 
-Four tiers, not two. The seam you are missing is not between Model A and Model B — it is between *learned* and *deterministic*, and it is legally mandatory.
+> **A→B 인터페이스를 이제 수집할 데이터로 supervise할 수 있다는 가정.**
+
+구체적으로: "텔레옵을 수집하고, 순기구학으로 EE 포즈를 계산하고, Model B를 (포즈 목표, 관절, 이미지) → 관절 명령으로 학습시키면 된다"는 가정.
+
+이것이 계획의 다른 모든 결함보다 위험한 이유:
+
+1. **조용하다.** 학습 손실은 훌륭할 것이다. 검증 손실도 훌륭할 것이다. 시뮬도 아마 멀쩡해 보일 것이다. 시뮬에서는 포즈가 구성상 정확하고 캘리브레이션 오차가 0이기 때문이다. 실패는 하드웨어에서, Model A의 실제 오차 아래에서, 몇 달 뒤에야 나타난다.
+2. **계획 자체의 목표를 뒤집는다.** Model B는 해석적 IK를 배울 것이다 — 이미 정확하게, 더 빠르게, 결정론적으로, 인증 가능하게 갖고 있는 함수를. 가장 희소한 자원(온로봇 양팔 데모)과 가장 희소한 컴퓨트(48 GB 통합 메모리)를 써서 `InverseKinematicsEEToJoints`의 열화판을 사는 셈이다. 그것은 용량을 분리하는 것이 아니라 파괴하는 것이다.
+3. **수집 시점에 복구 불가능하다.** 해결에는 *독립적으로 측정된* EE 포즈 채널(별도 피처로 기록된 VR/AVP 손 추적, 손목 AprilTag, 또는 모캡)과 *서보 전류/토크* 채널이 필요하다. 둘 다 에피소드 1 이전에 결정되며 기존 데이터셋에서 재구성할 수 없다. 이 계획의 다른 모든 것은 다시 할 수 있다; 이것만은 안 된다.
+4. **누적된다.** Model B는 정확히 도달 가능하고, 정확히 일관되고, manifold 위에 있는 포즈로만 학습된다. 배포 시에는 **첫 제어 스텝부터** 분포 밖이고, 이후 모든 스텝은 시연이 결코 커버하지 않은 상태에 조건화된다. 고전적인 연쇄(cascaded) 분포 이동이고, RL 세팅에서 HIRO의 off-policy 보정이 존재하는 이유가 바로 이것이다.
+
+**무엇이든 만들기 전에, 오후 한나절로 결판나는 값싼 진단 두 개:**
+- *Ablation 테스트:* Model B를 학습시킨 뒤 RGB 입력을 0으로 만들거나 배치 셔플하라. 검증 손실이 거의 안 움직이면 Model B는 IK 솔버이고 분리는 아무것도 사 주지 않은 것이다. **통과 기준: 비전 ablation이 rollout 성공률을 ≥20pp 깎아야 한다.**
+- *섭동(perturbation) 테스트:* Model B의 입력 포즈에 5–20 mm / 2–5°의 노이즈 — Model A의 현실적인 오차 크기 — 를 주입하고 관절 명령의 열화를 측정하라. 이것이 진짜 테스트 시점 체제이고, FK 레이블에 대한 검증 손실은 이를 체계적으로 과대평가한다.
+
+**차점 후보들, 솔직하게.** *거짓일 가능성이 가장 높은 가정:* "두 모델로 용량을 나누면 성능이 좋아진다." **어디에서도 이에 대한 증거를 찾지 못했다** — Helix, GR00T N1, π0.5 모두 명시적으로 추론 *rate*와 데이터 *재사용*을 위해 분리했고, 어느 쪽도 용량 분할의 이득을 주장하지 않는다. 제안에서 근거가 0인 유일한 부분이다. *가장 비싼 가정:* "제품은 Mac mini로 출하한다."
+
+---
+
+## 3. 권장 컴퓨트 토폴로지
+
+계층은 둘이 아니라 넷이다. 놓치고 있는 이음새는 Model A와 Model B 사이가 아니라 *학습된 것*과 *결정론적인 것* 사이이며, 이는 법적으로 의무다.
 
 ```
 ┌─ TIER 0 ── SENSORS ──────────────────────────────────────────────┐
@@ -148,371 +150,373 @@ Four tiers, not two. The seam you are missing is not between Model A and Model B
 └───────────────────────────────────────────────────────────────────┘
 ```
 
-**Latency budget.**
+*(참고: 위 Tier 1의 "DEV: Mac mini / PRODUCT: Jetson AGX Orin" 구도는 이후 REV.2/REV.3이 대체한다 — GalbotSDK가 Linux 전용이라 추론은 G1 탑재 AGX Orin, 학습·시뮬은 RTX 3090/Ubuntu 박스.)*
 
-| Hop | Path | Budget (p50) | Alarm (p99) |
+**Latency 예산.**
+
+| Hop | 경로 | 예산 (p50) | 알람 (p99) |
 |---|---|---|---|
-| H1 | photon → tensor on host | 15–30 ms | 45 ms |
-| H2 | preprocess | 3–6 ms | 10 ms |
-| H3 | shared backbone (2 cams @224²) | 40–70 ms | 110 ms |
-| H4a | Head A (1-in-N cycles) | 80–200 ms | 300 ms |
-| H4b | Head B action expert, 4 flow steps | 20–50 ms | 90 ms |
-| H5 | host → RT controller | 0.5–2 ms | 5 ms |
-| H6 | RT interpolate + clamp + QP | 1–2 ms | 3 ms (hard) |
-| H7 | fieldbus | 0.25–5 ms | 2× cycle |
-| H8 | servo + mechanics | 5–15 ms | 25 ms |
-| **Σ** | **sensor → motion onset** | **90–180 ms** | **250 ms p99.9 = alarm** |
+| H1 | 광자 → 호스트 위 텐서 | 15–30 ms | 45 ms |
+| H2 | 전처리 | 3–6 ms | 10 ms |
+| H3 | 공유 백본 (2캠 @224²) | 40–70 ms | 110 ms |
+| H4a | Head A (N사이클당 1회) | 80–200 ms | 300 ms |
+| H4b | Head B action expert, flow 4스텝 | 20–50 ms | 90 ms |
+| H5 | 호스트 → RT 컨트롤러 | 0.5–2 ms | 5 ms |
+| H6 | RT 보간 + 클램프 + QP | 1–2 ms | 3 ms (하드) |
+| H7 | 필드버스 | 0.25–5 ms | 사이클의 2× |
+| H8 | 서보 + 기계 응답 | 5–15 ms | 25 ms |
+| **Σ** | **센서 → 모션 개시** | **90–180 ms** | **250 ms p99.9 = 알람** |
 
-Two budgets, not one. **Planning latency** (above) is hidden by chunking — the robot executes 2 s of trajectory while the next chunk computes. **Reaction latency** is *not* hidden: the RT controller must be able to stop on force threshold or heartbeat loss within 50–200 ms, entirely independent of the policy. Design and test them separately. Track p99.9, never the mean — a policy averaging 40 ms that spikes to 400 ms will hurt someone.
+예산은 하나가 아니라 둘이다. **계획(planning) latency**(위)는 chunking으로 숨겨진다 — 다음 chunk가 계산되는 동안 로봇은 2초 분량의 궤적을 실행한다. **반응(reaction) latency**는 숨겨지지 *않는다*: RT 컨트롤러는 정책과 완전히 독립적으로, 힘 임계값 초과나 heartbeat 상실 시 50–200 ms 안에 정지할 수 있어야 한다. 두 예산을 따로 설계하고 따로 테스트하라. 평균이 아니라 p99.9를 추적하라 — 평균 40 ms인데 400 ms로 튀는 정책은 사람을 다치게 한다.
 
-**Decouple the host now.** Put all inference behind a `Policy.infer(obs) → ActionChunk` boundary with MLX and TensorRT implementations, and put the host behind a network interface. Then Mac-for-dev / Jetson-for-product is a config change, not a rewrite. This is the highest-leverage thing you can do this week.
+**지금 호스트를 분리하라.** 모든 추론을 `Policy.infer(obs) → ActionChunk` 경계 뒤에 두고 MLX와 TensorRT 구현을 마련하며, 호스트를 네트워크 인터페이스 뒤에 두어라. 그러면 개발은 Mac / 제품은 Jetson이 리라이트가 아니라 설정 변경이 된다. 이번 주에 할 수 있는 가장 레버리지 높은 일이다.
 
 ---
 
-## 4. Interface spec (bimanual)
+## 4. 인터페이스 스펙 (양팔)
 
-Two channels. The **latent is primary** (Helix/GR00T/π0.x precedent); the **structured block is supervised as an auxiliary head** for interpretability, safety clamping, field triage, and product versioning. Never let the structured block be the sole channel — it cannot express "squeeze harder," "wait for the other hand," "this grasp is slipping," or multimodality.
+채널은 둘이다. **latent가 1차 채널**(Helix/GR00T/π0.x 선례)이고, **구조화 블록은 auxiliary head로 supervise**되어 해석 가능성, 안전 클램핑, 현장 triage, 제품 버저닝에 쓰인다. 구조화 블록을 유일한 채널로 삼지 마라 — "더 세게 쥐어라", "다른 손을 기다려라", "이 파지가 미끄러지고 있다", 그리고 다중양상성(multimodality)을 표현할 수 없다.
 
-**One message. Both arms. One shared time base. Emitted at 5 Hz. Never two async per-arm streams.**
+**메시지 하나. 양팔 모두. 하나의 공유 시간 기준. 5 Hz로 방출. 비동기 팔별 스트림 두 개는 절대 금지.**
 
-### 4.1 Header (per message)
+### 4.1 헤더 (메시지당)
 
-| Field | Type / dim | Notes |
+| 필드 | 타입 / 차원 | 비고 |
 |---|---|---|
-| `interface_version` | uint16 | **semver, FROZEN.** Bumping it forces revalidation of BOTH layers. This field is the product asset. |
-| `seq` | uint32 | monotonic |
-| `t_capture` | int64 ns | monotonic clock, **camera exposure midpoint**, not host receive time |
-| `H` | uint8 | horizon steps; **H = 10** |
-| `dt` | float | 0.2 s → 2.0 s horizon, matched to Model B's chunk |
-| `latency_offset` | float | measured A→B staleness; also injected at training time |
+| `interface_version` | uint16 | **semver, 동결(FROZEN).** 올리면 두 계층 모두의 재검증이 강제된다. 이 필드가 제품 자산이다. |
+| `seq` | uint32 | 단조 증가 |
+| `t_capture` | int64 ns | 단조 클록, **카메라 노출 중점** — 호스트 수신 시각 아님 |
+| `H` | uint8 | horizon 스텝 수; **H = 10** |
+| `dt` | float | 0.2 s → horizon 2.0 s, Model B의 chunk와 일치 |
+| `latency_offset` | float | 측정된 A→B staleness; 학습 시에도 주입 |
 
-### 4.2 Global intent block (per message)
+### 4.2 전역 의도 블록 (메시지당)
 
-| Field | Dim | Notes |
+| 필드 | 차원 | 비고 |
 |---|---|---|
-| `latent_z` | **512** fp16 | primary channel; cross-attended by Head B |
-| `subtask` | string ≤64 | language, human-readable; **logged always** — this is your field-triage record |
-| `coordination_mode` | 4 (one-hot) | `{INDEPENDENT, GOAL_COORDINATED, LOOSELY_COUPLED, TIGHTLY_COUPLED}` — cheap to auto-label from demos (both grippers closed on same object) |
-| `mode_confidence` | 1 | gates the RT layer's internal-wrench limiter |
+| `latent_z` | **512** fp16 | 1차 채널; Head B가 cross-attention으로 소비 |
+| `subtask` | string ≤64 | 언어, 사람이 읽을 수 있음; **항상 로깅** — 이것이 현장 triage 기록이다 |
+| `coordination_mode` | 4 (one-hot) | `{INDEPENDENT, GOAL_COORDINATED, LOOSELY_COUPLED, TIGHTLY_COUPLED}` — 데모에서 자동 레이블링이 저렴하다(두 그리퍼가 같은 물체에 닫힘) |
+| `mode_confidence` | 1 | RT 계층의 internal wrench 리미터를 게이팅 |
 | `phase_id` | 5 (one-hot) | `{APPROACH, CONTACT, TRANSPORT, MANIPULATE, RELEASE}` |
-| `phase_progress` | 1 | 0..1 within phase |
-| `T_grasp_frozen` | 9 | inter-gripper transform **latched at contact entry** in TIGHTLY_COUPLED; held constant thereafter |
-| `uncertainty` | 9 | per-arm translational σ (3+3) + relative σ (3); RT layer scales speed limit by this |
-| `supervisor_flag` | 4 (one-hot) | `{CONTINUE, RETRY_SUBTASK, ABORT_TO_SAFE, REQUEST_TELEOP}` — **this is the MTBI field. Do not ship without it.** |
+| `phase_progress` | 1 | phase 내 0..1 |
+| `T_grasp_frozen` | 9 | TIGHTLY_COUPLED에서 **접촉 진입 시점에 래치**되는 그리퍼 간 변환; 이후 상수로 유지 |
+| `uncertainty` | 9 | 팔별 병진 σ (3+3) + 상대 σ (3); RT 계층이 이 값으로 속도 제한을 스케일 |
+| `supervisor_flag` | 4 (one-hot) | `{CONTINUE, RETRY_SUBTASK, ABORT_TO_SAFE, REQUEST_TELEOP}` — **이것이 MTBI 필드다. 이것 없이 출하하지 마라.** |
 
-### 4.3 Per-arm block — for each arm ∈ {L, R}, for each step h ∈ 1..H
+### 4.3 팔별 블록 — 각 팔 ∈ {L, R}, 각 스텝 h ∈ 1..H
 
-| Field | Dim | Frame | Notes |
+| 필드 | 차원 | 프레임 | 비고 |
 |---|---|---|---|
-| `dp_ee` | 3 | **current EE frame of that arm** | translation delta |
-| `dR_ee` | 6 | current EE frame | 6-D continuous rotation. **Not** quaternion, **not** Euler |
-| `dp_base` | 3 | `base_link` | same SE(3), re-expressed |
-| `dR_base` | 6 | `base_link` | Mixture-of-Frames: up to +15 pp from frame choice, and dynamic switching beats even an oracle fixed frame. Re-expression is ~free |
-| `gripper_width` | 1 | metres | **continuous, never binary** |
-| `gripper_effort` | 1 | normalized | carries grip force via the same PID-error mechanism |
+| `dp_ee` | 3 | **해당 팔의 현재 EE 프레임** | 병진 델타 |
+| `dR_ee` | 6 | 현재 EE 프레임 | 6-D 연속 회전. 쿼터니언 **아님**, Euler **아님** |
+| `dp_base` | 3 | `base_link` | 같은 SE(3)를 재표현 |
+| `dR_base` | 6 | `base_link` | Mixture-of-Frames: 프레임 선택만으로 최대 +15pp, 동적 전환은 oracle 고정 프레임조차 이긴다. 재표현 비용은 사실상 0 |
+| `gripper_width` | 1 | 미터 | **연속값, 절대 이진 금지** |
+| `gripper_effort` | 1 | 정규화 | 동일한 PID 오차 메커니즘으로 파지력을 실어 나른다 |
 | `stiffness_trans` | 1 | N/m | |
 | `stiffness_rot` | 1 | Nm/rad | |
 | `damping_ratio` | 1 | — | |
-| `squeeze_force` | 1 | N, signed along grasp axis | **the ALOHA implicit-force channel, made explicit** |
-| **subtotal** | **24 / arm / step** | | ×2 arms = **48** |
+| `squeeze_force` | 1 | N, 파지 축 방향 부호 포함 | **ALOHA의 암묵적 힘 채널을 명시화한 것** |
+| **소계** | **24 / 팔 / 스텝** | | ×2팔 = **48** |
 
-**ABSOLUTE POSE IS BANNED FROM THIS INTERFACE.** UMI ablation: relative 100% vs absolute 25% (n=20). Surgical Robot Transformer: ~0% with absolute EE pose across three tasks. On a self-built rig, hand-eye calibration error, FK error and backlash will be your dominant error term and they do not shrink with more data. They cancel in relative pose. **Head-relative is banned as the interface frame** — it adds head-joint backlash and a live head-to-base transform to the error budget, and simulation will never show you that penalty because sim extrinsics are exact. Head-relative pose belongs as an *input feature to Head A*, never as the interface.
+**절대 포즈는 이 인터페이스에서 금지된다.** UMI ablation: relative 100% vs absolute 25% (n=20). Surgical Robot Transformer: 절대 EE 포즈로 세 태스크 모두 ~0%. 자작 리그에서는 hand-eye 캘리브레이션 오차, FK 오차, 백래시가 지배적 오차 항이 되고, 데이터가 늘어도 줄지 않는다. 상대 포즈에서는 상쇄된다. **head 기준 상대 좌표도 인터페이스 프레임으로 금지된다** — 목 관절 백래시와 실시간 head→base 변환이 오차 예산에 추가되는데, 시뮬은 extrinsics가 정확하기 때문에 그 벌점을 절대 보여주지 않는다. head 기준 포즈는 *Head A의 입력 피처*로만 쓰고, 인터페이스로는 절대 쓰지 마라.
 
-### 4.4 Inter-arm block — per step h
+### 4.4 팔 간 블록 — 스텝 h당
 
-| Field | Dim | Notes |
+| 필드 | 차원 | 비고 |
 |---|---|---|
-| `dp_rel`, `dR_rel` | 3 + 6 | target `T_left→right`, **predicted DIRECTLY by the head — never derived by subtracting two absolute pose predictions.** Subtracting compounds both arms' errors into precisely the quantity the closed chain is most sensitive to |
-| `internal_wrench_setpoint` | 1 | desired squeeze along the grasp axis in coupled modes |
-| `sync_weight` | 1 | 0..1: how strictly the two arms must be simultaneous at this step |
-| **subtotal** | **11 / step** | |
+| `dp_rel`, `dR_rel` | 3 + 6 | 목표 `T_left→right`, **head가 직접 예측한다 — 절대 포즈 예측 두 개의 뺄셈으로 유도하지 않는다.** 뺄셈은 두 팔의 오차를 정확히 폐체인이 가장 민감한 양으로 합성한다 |
+| `internal_wrench_setpoint` | 1 | 결합 모드에서 파지 축 방향의 원하는 조임 |
+| `sync_weight` | 1 | 0..1: 이 스텝에서 두 팔이 얼마나 엄격하게 동시여야 하는가 |
+| **소계** | **11 / 스텝** | |
 
-### 4.5 Object block — TIGHTLY_COUPLED only, per step h
+### 4.5 물체 블록 — TIGHTLY_COUPLED 전용, 스텝 h당
 
-| Field | Dim | Notes |
+| 필드 | 차원 | 비고 |
 |---|---|---|
-| `dp_obj`, `dR_obj` | 3 + 6 | object pose delta |
+| `dp_obj`, `dR_obj` | 3 + 6 | 물체 포즈 델타 |
 | `obj_squeeze` | 1 | |
 
-In this mode the parameterization becomes **(object pose target) + (FIXED `T_grasp_frozen`) + (squeeze force)**. The 6 excess constraint DoF are *structurally eliminated* rather than regressed. This is the concrete fix for the closed-chain problem and it is nearly free to label.
+이 모드에서 파라미터화는 **(물체 포즈 목표) + (고정된 `T_grasp_frozen`) + (조임력)**이 된다. 초과 구속 6 DoF는 회귀되는 대신 *구조적으로 제거*된다. 이것이 폐체인 문제의 구체적 해결책이고, 레이블링 비용은 거의 0이다.
 
-### 4.6 Size
+### 4.6 크기
 
-`H=10 × (48 + 11 + 10) = 690` floats + `~28` global + `9` frozen grasp + `512` latent ≈ **1,239 floats ≈ 2.5 KB fp16, 12.4 KB/s at 5 Hz.** Bandwidth is a non-issue; do not compress at the cost of information.
+`H=10 × (48 + 11 + 10) = 690` floats + 전역 `~28` + 고정 파지 `9` + latent `512` ≈ **1,239 floats ≈ 2.5 KB fp16, 5 Hz에서 12.4 KB/s.** 대역폭은 논점이 아니다; 정보를 희생하면서까지 압축하지 마라.
 
-### 4.7 Model B output spec
+### 4.7 Model B 출력 스펙
 
-| Field | Value |
+| 필드 | 값 |
 |---|---|
-| Content | **absolute joint position targets**, both arms + continuous gripper |
-| Dim / step | 2×(6 or 7) joints + 2 gripper = **14–16** |
-| Chunk | **100 steps @ 50 Hz = 2.0 s**, one shared time index covering both arms |
-| Emission rate | 5–10 Hz, with temporal ensembling `w_i = exp(−m·i)` across overlaps |
-| NOT | joint velocities or torques — for a first product, the ALOHA joint-position→PID pattern is the highest reliability per unit effort and gives implicit force for free |
+| 내용 | **절대 관절 위치 목표**, 양팔 + 연속 그리퍼 |
+| 차원 / 스텝 | 2×(6 또는 7) 관절 + 그리퍼 2 = **14–16** |
+| Chunk | **100스텝 @ 50 Hz = 2.0 s**, 양팔을 커버하는 하나의 공유 시간 인덱스 |
+| 방출 rate | 5–10 Hz, 겹침 구간에 temporal ensembling `w_i = exp(−m·i)` |
+| 아닌 것 | 관절 속도나 토크 — 첫 제품에서는 ALOHA의 관절 위치→PID 패턴이 노력 대비 신뢰성이 가장 높고, 암묵적 힘을 공짜로 준다 |
 
-**Chunk, never per-step.** The ACT ablation is decisive: k=1 → 1% success, k=100 → 44%. A cerebellum reacting per-step to a per-step pose target forfeits the entire benefit chunking exists to provide.
+*(참고: 이후 REV.2에서 Galbot G1의 팔 명령이 SDK상 위치 전용임이 확정되어, 이 절대 관절 위치 출력 선택과 일치한다.)*
 
-### 4.8 What MUST be in the interface beyond pose — summary
+**Chunk로, 절대 스텝별로 하지 마라.** ACT의 ablation은 결정적이다: k=1 → 성공 1%, k=100 → 44%. 스텝별 포즈 목표에 스텝별로 반응하는 소뇌는 chunking이 존재하는 이유인 이점 전부를 포기한다.
 
-Gripper (continuous width **and** effort, inside Model B's 50 Hz chunk, never routed through the slow side — gripper errors are step-function catastrophic while arm errors self-correct); timing (shared time base + phase + sync weights + explicit latency offset); coordination mode (with the tightly-coupled reparameterization); stiffness/squeeze force (position control has zero force authority by construction — a pose-tracking controller drives force to zero); uncertainty; and the abort/stuck supervisor flag.
+### 4.8 포즈 외에 인터페이스에 반드시 있어야 하는 것 — 요약
+
+그리퍼(연속 width **및** effort, Model B의 50 Hz chunk 안에 두고 느린 쪽으로 절대 우회시키지 말 것 — 그리퍼 오류는 계단 함수처럼 파국적인 반면 팔 오류는 자기 교정된다); 타이밍(공유 시간 기준 + phase + sync 가중치 + 명시적 latency offset); 협조 모드(tightly-coupled 재파라미터화 포함); stiffness/조임력(위치 제어는 구조상 힘에 대한 권한이 0이다 — 포즈 추종 컨트롤러는 힘을 0으로 몬다); 불확실성; 그리고 abort/stuck supervisor 플래그.
+
+---
+## 5. 데이터 계획
+
+**계획 상수.** 양팔 텔레옵 처리량 **15 ep/hr**(범위 10–30; LeRobot 기본값인 에피소드 60초 + 리셋 60초만으로도 실패를 세기 전에 이미 30이 상한). 오퍼레이터 한 명이 하루 **4–5시간의 생산적 작업**을 지속 → 하루 ~75 에피소드, 월 ~1,500. **오퍼레이터 램프업: 쓸 만해지는 데 4–8시간, 일관성까지 20–40시간 — 에피소드 1을 세기 전에 소진하라.** 가정 수율 75% *(미검증 — 실제 수율이 50%면 아래 모든 숫자가 50% 상승한다)*. 저장 용량 에피소드당 50–150 MB.
+
+### 5.1 에피소드 예산
+
+**Stage 1 — 아키텍처 결정 (수집 약 2주).**
+- 시뮬: 8–10개 양팔 태스크에서 무제한 스크립트 데모. 먼저 ACT의 공개 baseline 86% / 32%를 재현해 하니스를 검증하라.
+- 실기체: **1 태스크 × 3 스테이징 구성 × 30 = 90 에피소드(텔레옵 ~6h, 스테이징 포함 ~9h)** + 아키텍처당 실기체 평가 rollout 100회. 목적은 성능이 아니라 *시뮬과의 순위 일치(rank agreement)*다.
+
+**Stage 2 — 태스크 하나를 제품 신뢰성까지 (약 6–10주, 오퍼레이터 1명).**
+- **스테이징 구성 20–30개 × 데모 30–40개 = 사용 가능 600–1,200.** 볼륨이 아니라 다양성으로 예산을 잡아라: 일반화는 *환경과 물체의 수*에 대한 거듭제곱 법칙을 따르고, 같은 장면에 데모를 더 얹는 한계 수익은 임계값 이후 ≈0이다. ~32개 환경/물체에 걸친 ~1,600 데모가 새 환경 + 새 물체에서 ~90% zero-shot을 줬다.
+- **+ HIL/DAgger 2–3라운드 × 50 에피소드 = 100–150.** 우발 예산이 아니라 항목 예산(~+30%)으로 잡아라.
+- 사용 가능 600–1,200을 확보하려면 약 **900–1,600** 수집. 순수 텔레옵 ~60–105시간, 스테이징/큐레이션 포함 ~110–160시간.
+
+**Stage 3 — 3–5 태스크 제품 (약 3–5개월).**
+- **3–5 태스크 × 사용 가능 400–500 = 사용 가능 1,500–2,500**, 수집 약 2,000–3,300, 순수 텔레옵 ~150–220시간, 총 인력 ~300–450시간. 플러스 플라이휠에서 나오는 자율 rollout 데이터.
+
+**명시적으로 범위 밖: 50 태스크.** 그것은 사용 가능 ~20,000 / 수집 ~26,700 에피소드, 순수 텔레옵 ~1,780시간, 총 인력 ~3,000–3,500시간, 1.3–4 TB, 그리고 **DIY $200k–500k / 9–27개월**(또는 휴머노이드 프로그램의 사용 가능 데모당 $50–150 단가로는 $1M–3M)이다. 무엇을 약속하든 표준 재수집 배수 2–3×를 적용하라. 이것은 부업이 아니라 시리즈 A 규모의 프로그램이다. *(비용 수치는 상당 부분 벤더 마케팅 페이지에 기대고 있다 — 방향성 참고치로만 다뤄라.)*
+
+### 5.2 수집 하드웨어
+
+**구매: 능동 모터 양팔 리더-팔로워 리그.** 프로토타입: SO-101 양팔, 팔 4개 ≈ $800–1,200, 카메라 4대 ≈ $400–600. 검증급: ALOHA-2급 ≈ $15–20k. **제품: 인증된 안전 컨트롤러가 딸려 오는 팔(UR / Franka / Doosan / Techman / Standard Bots급) — 그리고 이 결정은 데이터 수집보다 앞서야 한다. 데이터가 embodiment 특정적이기 때문이다.** *(참고: 이후 REV.2에서 대상 로봇이 Galbot G1으로 확정됨.)*
+
+**수동 GELLO는 사지 마라.** LeRobot의 DAgger/HIL 루프는 토크를 켜고 끌 수 있고 팔로워의 포즈로 서보할 수 있는 *능동* 모터 텔레오퍼레이터를 요구한다. HIL은 수집하게 될 데이터 중 레버리지가 가장 높은 유형이다. 수동 리더는 그 길을 봉쇄한다.
+
+**VR을 1차 채널로 쓰지 마라.** 리더 팔이 있으면 기록되는 액션이 IK가 전혀 개입하지 않은 관절 명령 *그 자체*다. VR로는 솔버가 관절로 변환한 손 포즈를 기록하게 된다 — 그래서 궤적에는 솔버의 특이점 처리, 관절 한계 클램핑, 여유자유도 선택이 실려 있고, 정책은 그 아티팩트를 배운다. **하지만** VR/AVP는 *독립적으로 명세된* EE 포즈 신호를 주는 유일한 옵션이다 — 정확히 FK label leakage의 퇴화를 깨는 그것이다. 계량적 포즈 인터페이스를 유지한다면, 리더 팔과 병행해 VR 손 추적 또는 손목 AprilTag를 **2차 로깅 피처**로 추가하라.
+
+**카메라: 손목 2대(팔당 1대) + 장면 1–2대, ≥480×640, ~30 fps, 고정 마운트, 고정 조명.** 에피소드 1부터 각 팔에 손목 카메라를 다는 것은 협상 불가다 — 단일 전역 카메라 실패(그리퍼-물체 접촉을 결코 보지 못하는 것)는 가장 흔하고 가장 비싼, 문서화된 실수이며 데이터 수집 *후*에야 감지된다. 컴퓨트 결합도 주의하라: M4 Pro에서 224² 카메라 2대가 실용 상한이고, 3대째는 제어 rate의 ~25%를 비용으로 물며, 448²는 비전 토큰이 4배다. **데이터는 기록되는 순간 해상도에 잠긴다** — 에피소드 1 전에 결정하라.
+
+### 5.3 분리가 학습 가능하려면 반드시 로깅해야 하는 것
+
+RDT-1B의 128차원 온디스크 스키마를 채택하라(팔당: 관절 위치 [0-9], 그리퍼 [10-14], 관절 속도 [15-29], eef_pos [30-32], eef 6-D 회전 [33-38], eef_vel, eef_angular_vel; 왼팔은 [50-94]에 미러) — 수집 시 비용이 0이고, 데이터가 RDT-1B / π0 / GR00T N1에서 바로 fine-tuning 가능해진다. 그 위에, 없으면 분리가 학습 불가이거나 복구 불가가 되는 필드들:
+
+1. **액션 레이블로 리더 관절 위치**(팔로워 아님). 인가 힘 ≈ `Kp·(q_leader − q_follower)`. **이것을 틀리면 복구 불가.**
+2. 팔로워의 측정 관절 + 관절 속도.
+3. **관절별 서보 모터 전류/토크.** Dynamixel/STS 서보는 이미 이를 보고한다. 학습된 Model B를 해석적 IK보다 낫게 만드는 *유일한* 정보 채널이다. 없으면 더 나쁜 IK 솔버를 학습시키는 것이다.
+4. 그리퍼 명령 width, 측정 width, **그리고** 전류 — 셋 다.
+5. **프레임당 측정된 `T_left→right`** (*두* head 모두의 입력으로; UMI 70% vs 30%).
+6. **독립적으로 측정된 EE 포즈 채널**(VR/AVP 트래커 또는 손목 AprilTag) — 계량적 포즈 인터페이스를 유지하는 경우에 한해. 수집 시점에 결정되며, 재구성 불가.
+7. 손목 F/T, 또는 전류 기반 외력 추정, ≥500 Hz. *(참고: 이후 REV.2에서 Galbot G1의 손목 F/T 표준 탑재가 확정됨.)*
+8. **카메라 스트림별 하드웨어 타임스탬프, 모든 센서를 하나의 단조 클록 위에**, 그리고 에피소드별로 측정된 센서→액추에이션 latency. UMI의 latency matching 하나만으로 87.5% vs 57.5%.
+9. 협조 모드 레이블과 phase 분할(자동 유도 가능: 두 그리퍼 닫힘 + 둘 다 같은 물체와 접촉).
+10. **개입(intervention)/takeover 이벤트, 성공/실패 레이블, 그리고 실패 분류 체계.** 이것들이 Recap식 보상 신호이자 MTBI 지표가 된다.
+11. 장면 구성 ID, 조명 ID, 물체 ID, 오퍼레이터 ID.
+12. **세션별 캘리브레이션 스냅샷**(hand-eye, intrinsics, extrinsics). 없으면 캘리브레이션 드리프트와 정책 회귀(regression)를 나중에 분리할 수 없다.
+
+### 5.4 연쇄 분포 이동(cascaded distribution shift) 회피 — 비용순 정렬
+
+1. **Scheduled sampling / student forcing (무료).** Model B를 ground-truth 인터페이스 값과 Model A *자신의 예측*의 어닐링 혼합으로 학습시켜라, 학습 동안 GT 100% → 0%. train/test 입력 불일치를 직접 겨냥한다.
+2. **Hindsight relabeling (무료).** HIRO의 해법을 모방학습으로 이식: Model B의 goal을 명목상 명령된 것이 아니라 *실제로 달성된 것*으로 레이블링해, goal 조건화가 off-manifold goal에 강건해지게 한다.
+3. **Model A의 *측정된* 오차 크기에 맞춘 노이즈 주입 (DART, 거의 무료).** 학습 시 인터페이스에 5–20 mm / 2–5°를 주입하라. DART는 최대 3× 낮은 컴퓨트로 DAgger의 최종 성능에 도달하고, 수집 중 supervisor 비용이 누적 보상의 5%에 그친다(DAgger는 80%).
+4. **Latency matching.** *배포되는* A→B staleness를 학습 시 Head A의 conditioning과 Head B의 타깃 사이 시간 오프셋으로 주입하라 — Helix가 정확히 이렇게 한다. 두 팔이 같은 stale 타깃을 소비하므로 staleness는 공통 모드가 되어 **상대 항에서 상쇄된다** — 절대 포즈에 반대하는 또 하나의 독립 논거다.
+5. **인터페이스를 관통하는 joint end-to-end fine-tuning.** 두 절반을 stop-gradient(Knowledge Insulation)로 따로 pretraining한 뒤, 마지막 다듬기로 unfreeze하고 인터페이스를 관통해 backprop하라. 작동하는 모든 듀얼 시스템 VLA가 이렇게 하며, cascaded shift를 실제로 죽이는 것이 이것이다. Insulation 없이 pretrained VLM에 flow matching action expert를 순진하게 붙이면 "significantly harms both training speed and knowledge transfer" (학습 속도와 지식 전이를 모두 크게 해친다).
+6. **하드웨어에서의 HIL/DAgger 라운드.** 태스크당 라운드당 ~50 에피소드, 2–3라운드, 일시정지/takeover/복구/복귀 루프를 하나의 연속 궤적으로 기록(RaC의 recovery + correction 분해). 대형 pretrained VLA조차 이것이 필요하다.
+7. **Chunked 인터페이스.** 인터페이스는 단일한 다음 포즈가 아니라 *궤적 chunk*를 실어 나른다. 협상 불가.
 
 ---
 
-## 5. Data plan
+## 6. 시뮬 계획 — macOS에 대해 정직하게
 
-**Planning constants.** Bimanual teleop throughput **15 ep/hr** (range 10–30; LeRobot's own 60 s episode + 60 s reset defaults hard-cap you at 30 before failures). One operator sustains **4–5 productive hours/day** → ~75 episodes/day, ~1,500/month. **Operator ramp: 4–8 h to usable, 20–40 h to consistent — spend it before episode 1 counts.** Assumed yield 75% *(unverified — if your real yield is 50%, every number below rises 50%)*. Storage 50–150 MB/episode.
+### 6.1 이 급의 머신에서 실제로 측정된 것
 
-### 5.1 Episode budgets
+M4 Mac mini(10코어, 32 GB, macOS 26.4.1, mujoco 3.10.0 arm64), MuJoCo Menagerie 양팔 ALOHA에서 측정:
 
-**Stage 1 — decide the architecture (≈2 weeks of collection).**
-- Sim: unlimited scripted demos on 8–10 bimanual tasks. Reproduce ACT's published 86% / 32% baseline first to validate the harness.
-- Real: **1 task × 3 staging configs × 30 = 90 episodes (~6 h teleop, ~9 h with staging)** plus 100 real eval rollouts per architecture. Purpose is *rank agreement with sim*, not performance.
+- **물리는 병목이 아니다.** 맨 ALOHA: 13,481 steps/s = 2 ms 타임스텝에서 27× 실시간, 코어 1개. ALOHA + 자유 물체 5개(nv=46, ~27 접촉): 7,125 steps/s = 14.2× 실시간. 멀티프로세스 합산: 1 proc 7,053 / 4 procs 25,062 / 8 procs **38,262 steps/s**. 상태 전용 환경 스텝 1억 회 ≈ **45분**.
+- **오프스크린 렌더링은 단단한 벽이다.** `render()` 호출당 고정 **13.11 ms, 해상도와 완전히 무관**(84², 128², 224², 320² 모두 ≈76–77 fps) — fill rate가 아니라 GPU sync/readback 오버헤드다. **병렬화되지 않는다:** 1 proc = 2캠 @224²에서 38 env-steps/s; 4 procs = 총 45; 8 procs = 총 44. 머신 전체 상한 ≈ **초당 렌더 프레임 90 ≈ 40 env-steps/s.**
 
-**Stage 2 — one task to product reliability (≈6–10 weeks, one operator).**
-- **20–30 staging configurations × 30–40 demos = 600–1,200 usable.** Budget by diversity, not volume: generalization follows a power law in the *number of environments and objects*, and marginal return of extra demos in the same scene is ≈0 past a threshold. ~1,600 demos across ~32 environments/objects gave ~90% zero-shot on new environment + new object.
-- **+2–3 HIL/DAgger rounds × 50 episodes = 100–150.** Budget this as a line item (~+30%), not a contingency.
-- Collect ≈**900–1,600** to land 600–1,200 usable. ~60–105 pure teleop hours, ~110–160 h with staging/curation.
+**귀결.** 이 Mac에서 시뮬 픽셀 기반 RL은 죽었다(환경 스텝 1M ≈ 6.2h, 100M ≈ 25일). 스크립트/텔레옵 데모 모방학습 + rollout 평가만이 유일하게 성립하는 로컬 루프다. 평가 예산: 600스텝(30 Hz에서 20초) 에피소드가 벽시계 ~15초 → **머신 전체로 시간당 평가 에피소드 ~240개.**
 
-**Stage 3 — 3–5 task product (≈3–5 months).**
-- **3–5 tasks × 400–500 usable = 1,500–2,500 usable**, ≈2,000–3,300 collected, ~150–220 pure teleop hours, ~300–450 total human-hours. Plus autonomous-rollout data from the flywheel.
+### 6.2 macOS에서 사용 불가 — 확인됨, 우회 불가
 
-**Explicitly out of scope: 50 tasks.** That is ~20,000 usable / ~26,700 collected episodes, ~1,780 pure teleop hours, ~3,000–3,500 total human-hours, 1.3–4 TB, and **$200k–500k DIY / 9–27 months** (or $1M–3M at the $50–150/usable-demo humanoid-program figure). Apply the standard 2–3× re-collection multiplier to whatever you commit. This is a Series-A-scale program, not a side activity. *(Cost figures lean substantially on vendor marketing pages — treat as directional.)*
-
-### 5.2 Collection hardware
-
-**Buy: an active-motor bimanual leader-follower rig.** Prototype: SO-101 bimanual, 4 arms ≈ $800–1,200, plus 4 cameras ≈ $400–600. Validated: ALOHA-2-class ≈ $15–20k. **Product: arms that ship a certified safety controller (UR / Franka / Doosan / Techman / Standard Bots class) — and this decision must precede data collection, because your data is embodiment-specific.**
-
-**Do not buy passive GELLO.** LeRobot's DAgger/HIL loop requires a teleoperator with *active* motors that can enable/disable torque and servo to the follower's pose. HIL is the highest-leverage data type you will collect. A passive leader forecloses it.
-
-**Do not use VR as the primary channel.** With a leader arm the recorded action *is* a joint command with zero IK in the loop. With VR you record hand poses that a solver converted to joints — so the trajectory carries the solver's singularity handling, joint-limit clamping and redundancy choices, and the policy learns those artifacts. **But** VR/AVP is the only option that gives an *independently specified* EE pose signal — which is exactly what breaks the FK label-leakage degeneracy. If you keep a metric pose interface, add VR hand tracking or wrist AprilTags as a **secondary logged feature** alongside the leader arms.
-
-**Cameras: 2 wrist (one per arm) + 1–2 scene, ≥480×640, ~30 fps, fixed mounts, fixed lighting.** A wrist camera on each arm from episode 1 is non-negotiable — the single-global-camera failure (never seeing gripper-object contact) is the most common and most expensive documented mistake, detectable only *after* the data is collected. Note the compute coupling: 2 cameras at 224² is the practical ceiling on M4 Pro; a third costs ~25% of your control rate and 448² costs 4× the vision tokens. **Data is resolution-locked once recorded** — decide before episode 1.
-
-### 5.3 What MUST be logged for the split to be trainable at all
-
-Adopt RDT-1B's 128-dim on-disk schema (per arm: joint pos [0-9], gripper [10-14], joint vel [15-29], eef_pos [30-32], eef 6-D rotation [33-38], eef_vel, eef_angular_vel; left mirrors at [50-94]) — it costs nothing at collection time and makes your data directly finetunable on RDT-1B / π0 / GR00T N1. On top of that, these are the fields without which the split is untrainable or unrecoverable:
-
-1. **Leader joint positions as the action label** (not follower). Applied force ≈ `Kp·(q_leader − q_follower)`. **Getting this wrong is unrecoverable.**
-2. Follower measured joints + joint velocities.
-3. **Servo motor current / torque per joint.** The Dynamixel/STS servos already report it. This is the *only* information channel that makes a learned Model B better than analytic IK. Without it, you are training a worse IK solver.
-4. Gripper commanded width, measured width, **and** current — all three.
-5. **Measured `T_left→right` per frame** (fed as input to *both* heads; UMI 70% vs 30%).
-6. **An independently measured EE pose channel** (VR/AVP tracker or wrist AprilTags) — if and only if you keep the metric pose interface. Decided at collection time; cannot be reconstructed.
-7. Wrist F/T, or a current-based external-force estimate, at ≥500 Hz.
-8. **Hardware timestamps per camera stream, all sensors on one monotonic clock**, plus per-episode measured sensor→actuation latency. UMI's latency matching alone was 87.5% vs 57.5%.
-9. Coordination-mode label and phase segmentation (auto-derivable: both grippers closed + both in contact with same object).
-10. **Intervention / takeover events, success/failure label, and a failure taxonomy.** These become your Recap-style reward signal and your MTBI metric.
-11. Scene config ID, lighting ID, object ID, operator ID.
-12. **Calibration snapshot per session** (hand-eye, intrinsics, extrinsics). Without it you cannot later separate calibration drift from policy regression.
-
-### 5.4 Avoiding cascaded distribution shift — ranked by cost
-
-1. **Scheduled sampling / student forcing (free).** Train Model B on an annealed mixture of ground-truth interface values and Model A's *own predictions*, 100% → 0% GT over training. Directly targets the train/test input mismatch.
-2. **Hindsight relabeling (free).** HIRO's fix, transferred to imitation: label Model B's goal with what was *actually achieved*, not what was nominally commanded, so goal-conditioning is robust to off-manifold goals.
-3. **Noise injection sized to Model A's *measured* error (DART, near-free).** Inject 5–20 mm / 2–5° into the interface at training time. DART matches DAgger's final performance at up to 3× lower compute and costs the supervisor only 5% of cumulative reward during collection vs DAgger's 80%.
-4. **Latency matching.** Inject the *deployed* A→B staleness as a temporal offset between Head A's conditioning and Head B's targets during training — Helix does exactly this. Because both arms consume the same stale target, the staleness is common-mode and **cancels in the relative term** — an independent argument against absolute pose.
-5. **Joint end-to-end finetuning through the interface.** Pretrain the halves separately with a stop-gradient (Knowledge Insulation), then unfreeze and backprop through the interface as final polish. This is what every working dual-system VLA does, and it is what actually kills cascaded shift. Naively bolting a flow-matching action expert onto a pretrained VLM without insulation "significantly harms both training speed and knowledge transfer."
-6. **HIL/DAgger rounds on hardware.** ~50 episodes per task per round, 2–3 rounds, with the pause/takeover/recover/return loop recorded as one continuous trajectory (RaC's recovery + correction decomposition). Even large pretrained VLAs need this.
-7. **Chunked interface.** The interface carries a *trajectory chunk*, never a single next pose. Non-negotiable.
-
----
-
-## 6. Sim plan — honest about macOS
-
-### 6.1 What was actually measured on this class of machine
-
-Measured on an M4 Mac mini (10-core, 32 GB, macOS 26.4.1, mujoco 3.10.0 arm64), MuJoCo Menagerie bimanual ALOHA:
-
-- **Physics is not the bottleneck.** Bare ALOHA: 13,481 steps/s = 27× realtime at 2 ms timestep, one core. ALOHA + 5 free objects (nv=46, ~27 contacts): 7,125 steps/s = 14.2× realtime. Multiprocess aggregate: 1 proc 7,053 / 4 procs 25,062 / 8 procs **38,262 steps/s**. 100M state-only env steps ≈ **45 minutes**.
-- **Offscreen rendering is a hard wall.** Fixed **13.11 ms per `render()` call, completely independent of resolution** (84², 128², 224², 320² all ≈76–77 fps) — it is GPU-sync/readback overhead, not fill rate. **It does not parallelize:** 1 proc = 38 env-steps/s with 2 cams @224²; 4 procs = 45 total; 8 procs = 44 total. Machine-wide ceiling ≈ **90 rendered frames/s ≈ 40 env-steps/s.**
-
-**Consequences.** Pixel-based RL in sim on this Mac is dead (1M env steps ≈ 6.2 h, 100M ≈ 25 days). Imitation learning from scripted/teleop demos plus rollout evaluation is the only viable local loop. Evaluation budget: a 600-step (20 s @30 Hz) episode costs ~15 s wall → **~240 eval episodes per hour for the entire machine.**
-
-### 6.2 What is unavailable on macOS — confirmed, not workaroundable
-
-| Tool | Status |
+| 도구 | 상태 |
 |---|---|
-| **Isaac Sim / Isaac Lab** | Ubuntu 22.04 x64 / Win 11 x64 only, CUDA 12+, ≥16 GB VRAM. **No macOS.** |
-| **MuJoCo Playground / MJWarp** | `jax[cuda12]`; MJWarp needs CUDA ≥12.4. **NVIDIA only.** |
-| **RoboTwin 2.0** — *the best-matched bimanual benchmark* (50 dual-arm tasks, 5 embodiments, 731 objects, 100k+ trajectories, 5-axis DR) | Docs verbatim: *"no support for MacOS."* Needs Linux + Vulkan + CUDA 12.1 via SAPIEN. |
-| **MJX** | Three independent blockers, all confirmed empirically: `jax 0.11.0` exposes only `CpuDevice` (jax-metal abandoned, issues closed Dec 2025); `mjx.put_model` raises `NotImplementedError: (mjGEOM_CYLINDER, mjGEOM_MESH)`; jit of the mesh-heavy bimanual scene at batch=32 was **OOM-killed on 32 GB**. |
-| **ManiSkill3** | macOS = CPU sim + render only; docs say macOS is for *"inference, local debugging, and development."* |
-| **Genesis** | Claims a Metal backend (Quadrants Taichi fork + PyTorch MPS). **Unverified**; all published throughput is CUDA. Half-day spike, not a bet. |
+| **Isaac Sim / Isaac Lab** | Ubuntu 22.04 x64 / Win 11 x64 전용, CUDA 12+, ≥16 GB VRAM. **macOS 없음.** |
+| **MuJoCo Playground / MJWarp** | `jax[cuda12]`; MJWarp는 CUDA ≥12.4 필요. **NVIDIA 전용.** |
+| **RoboTwin 2.0** — *가장 잘 맞는 양팔 벤치마크*(듀얼암 태스크 50, embodiment 5, 물체 731, 궤적 100k+, 5축 DR) | 문서 원문 그대로: *"no support for MacOS."* SAPIEN 경유 Linux + Vulkan + CUDA 12.1 필요. *(참고: 이후 REV.3에서 RoboTwin 2.0을 RTX 3090/Ubuntu 박스에서 시뮬 embodiment로 사용하기로 확정됨.)* |
+| **MJX** | 세 개의 독립적인 blocker, 전부 경험적으로 확인: `jax 0.11.0`은 `CpuDevice`만 노출(jax-metal은 방치 상태, 이슈들 2025년 12월 종결); `mjx.put_model`이 `NotImplementedError: (mjGEOM_CYLINDER, mjGEOM_MESH)` 발생; 메시가 많은 양팔 장면의 batch=32 jit은 32 GB에서 **OOM으로 강제 종료됨**. |
+| **ManiSkill3** | macOS = CPU 시뮬 + 렌더만; 문서상 macOS는 *"inference, local debugging, and development"* (추론, 로컬 디버깅, 개발) 용도. |
+| **Genesis** | Metal 백엔드를 주장(Quadrants Taichi 포크 + PyTorch MPS). **미검증**; 공개된 처리량 수치는 전부 CUDA. 반나절 스파이크 대상이지, 베팅 대상은 아니다. |
 
-**Available on macOS:** MuJoCo 3.10 native (excellent), robosuite 1.5 two-arm envs (**only 3 tasks — far too few to test an architectural hypothesis**), RoboCasa-GR1 (24 bimanual tabletop tasks, the better local option if your embodiment is humanoid-torso-like), and your own MJCF.
+**macOS에서 사용 가능:** MuJoCo 3.10 네이티브(훌륭함), robosuite 1.5 two-arm 환경(**태스크 3개뿐 — 아키텍처 가설을 테스트하기에는 턱없이 부족**), RoboCasa-GR1(양팔 탁상 태스크 24개, embodiment가 휴머노이드 토르소형이라면 더 나은 로컬 옵션), 그리고 자작 MJCF.
 
-### 6.3 The plan
+### 6.3 계획
 
-**Split the compute geographically, and decide this first.** Mac mini = task authoring, state-only rollouts, the checkpoint-selection harness, latency/memory benchmarking, and the deployment inference target. **A rented Linux + NVIDIA box (L4/A10/4090 class) = RoboTwin 2.0, ManiSkill3 GPU, all synthetic data generation, all training, and the statistically-powered ablation with batched rendering.** LeRobot's own guide: ACT 5 epochs on ~50 episodes = 30–60 min on a 4090 vs **6–14 h on Apple Silicon MPS**, and there is *no MPS row at all* for `diffusion`, `smolvla`, `pi0`, `pi05`. The Mac cannot train your policies regardless of what you ship on.
+**컴퓨트를 지리적으로 분리하고, 이것부터 결정하라.** Mac mini = 태스크 저작, 상태 전용 rollout, checkpoint 선택 하니스, latency/메모리 벤치마킹, 그리고 배포 추론 타깃. **임대한 Linux + NVIDIA 박스(L4/A10/4090급) = RoboTwin 2.0, ManiSkill3 GPU, 모든 합성 데이터 생성, 모든 학습, 그리고 배치 렌더링을 동원한 통계적 검정력 있는 ablation.** *(참고: 이후 REV.3에서 자체 RTX 3090/64GB/Ubuntu 박스로 확정됨.)* LeRobot 자체 가이드: ~50 에피소드에 ACT 5 epoch = 4090에서 30–60분 vs **Apple Silicon MPS에서 6–14시간**, 그리고 `diffusion`, `smolvla`, `pi0`, `pi05`에는 *MPS 행 자체가 없다*. 무엇을 얹어 출하하든, Mac은 당신의 정책을 학습시킬 수 없다.
 
-**Do system identification in week 1, not month 6.** SIMPLER perturbed *only* joint stiffness and damping — nothing visual — and sim's ranking fidelity degraded 2–3× (MMRV 0.031 → 0.070 → 0.100). Until sysID is done, **sim results about Model B are not evidence.** Measure: joint stiffness, damping, friction, actuator lag, control-loop latency and jitter, gripper force curve, and — critically — **your rig's actual Cartesian stiffness**, which determines whether closed-chain violation shows up as slipping (recoverable) or crushing/e-stop (unrecoverable). This means you need a small real dataset even in a sim-first plan.
+**시스템 식별(sysID)은 6개월차가 아니라 1주차에 하라.** SIMPLER는 관절 stiffness와 damping *만* 흔들었는데 — 시각 요소는 전혀 건드리지 않고 — 시뮬의 순위 신뢰도가 2–3× 열화했다(MMRV 0.031 → 0.070 → 0.100). sysID가 끝나기 전까지 **Model B에 관한 시뮬 결과는 증거가 아니다.** 측정 항목: 관절 stiffness, damping, 마찰, 액추에이터 지연, 제어 루프 latency와 jitter, 그리퍼 힘 곡선, 그리고 — 결정적으로 — **리그의 실제 Cartesian stiffness**. 이것이 폐체인 위반이 미끄러짐(복구 가능)으로 나타날지 으스러짐/e-stop(복구 불가)으로 나타날지를 결정한다. 즉 시뮬 우선 계획에서도 소규모 실기체 데이터셋이 필요하다.
 
-**Know exactly what sim can and cannot decide.**
+**시뮬이 결정할 수 있는 것과 없는 것을 정확히 알아라.**
 
-*Sim can honestly answer:* does the split learn from fewer demos; does it generalize better to unseen objects/positions/clutter; is the A→B interface information-sufficient (is there a task the monolith solves that the split structurally cannot); does it degrade gracefully when A is wrong; does the stack meet latency/memory budget.
+*시뮬이 정직하게 답할 수 있는 것:* 분리가 더 적은 데모로 학습되는가; 못 본 물체/위치/잡동사니에 더 잘 일반화하는가; A→B 인터페이스가 정보 충분한가(monolith는 푸는데 분리는 구조적으로 못 푸는 태스크가 있는가); A가 틀렸을 때 graceful degradation을 보이는가; 스택이 latency/메모리 예산을 맞추는가.
 
-*Sim cannot answer:* whether the split wins on real contact. Evidence: even fully visually-matched + sysID'd rigid tasks leave a **13.6–32.8 pp absolute real-sim success gap**. On contact/deformable tasks in a stock simulator, policy ranking is near-uncorrelated with reality — **Pearson r = 0.237 on rope routing**, 0.649 on T-block pushing; plush-toy grasping **could not be stably simulated at all** even in a purpose-built physics-optimized 3D-Gaussian-Splatting digital twin. A 5–10 pt architectural difference sits well inside that noise band.
+*시뮬이 답할 수 없는 것:* 분리가 실제 접촉에서 이기는가. 증거: 시각적으로 완전히 매칭하고 sysID까지 마친 강체 태스크조차 **실기체-시뮬 절대 성공률 격차 13.6–32.8pp**를 남긴다. 재고(stock) 시뮬레이터의 접촉/변형체 태스크에서 정책 순위는 현실과 거의 무상관이다 — **로프 라우팅 Pearson r = 0.237**, T블록 밀기 0.649; 봉제 인형 파지는 물리 최적화된 3D-Gaussian-Splatting 디지털 트윈을 목적 제작하고도 **아예 안정적으로 시뮬레이션되지 않았다**. 5–10pt의 아키텍처 차이는 그 노이즈 대역 안에 푹 잠긴다.
 
-*And the risk is bidirectional, which is why a small sim margin carries zero information.* Sim contact is smoother and more forgiving, so a pose bottleneck costs **less** in sim than on hardware where the cerebellum needs slip cues a pose channel discards → **sim overstates the split**. But the monolith sees pixels and joints jointly and can exploit sim-specific dynamics shortcuts → **sim understates the monolith**. Nothing establishes which dominates.
+*그리고 리스크는 양방향이라, 작은 시뮬 격차는 정보량이 0이다.* 시뮬의 접촉은 더 매끄럽고 관대해서, 포즈 병목의 비용이 하드웨어에서보다 시뮬에서 **덜** 든다. 하드웨어에서는 소뇌가 포즈 채널이 버리는 슬립 단서를 필요로 한다 → **시뮬은 분리를 과대평가한다**. 반면 monolith는 픽셀과 관절을 함께 보며 시뮬 특유의 동역학 지름길을 착취할 수 있다 → **시뮬은 monolith를 과소평가한다**. 어느 쪽이 지배하는지 확정하는 근거는 없다.
 
-**Therefore:**
-- **Pre-register the decision rule before running anything.** Trust a sim verdict only if the effect is **>15–20 pp**, holds across **≥8–10 distinct tasks** and **≥3 seeds**, and **survives a dynamics-randomization sweep** (friction ×[0.5, 2.0]; added control latency 0–100 ms; controller gain error ±30%; gripper force ±30%; hand-eye extrinsic noise 5–10 mm / 1–2°). If the ranking flips anywhere in that sweep, sim cannot answer your question.
-- **Insert an early hardware checkpoint.** 2–3 tasks, ~50 real demos each, both architectures, ~100 real eval episodes per architecture. If sim and real agree in *rank*, you have earned the right to trust sim for the rest. If they disagree, sim is a development tool only. **Do not run 6 months of sim before touching hardware.**
-- **Plan for co-training, not zero-shot transfer.** The RSS 2025 recipe: 4,000 sim demos + 40–400 real demos → **+37.9% average across 6 tasks / 2 embodiments including a bimanual humanoid**; real-only 31% → 76% with digital cousins + prior sim data; benefit persists even at 400 real demos. Mirror every sim task against a real task with **identical success criteria** (that mattered more than camera-pose matching). Target roughly 10:1 to 100:1 sim:real and tune the ratio explicitly. *(RoboTwin's headline "+367% few-shot" figures are relative gains over a deliberately weak 10-demo baseline — do not budget against them.)*
-- **Never select checkpoints by validation loss.** Validation MSE: MMRV 0.375, r 0.308. Simulated rollout success: MMRV 0.056, r 0.924. Build the simulator as a permanent rollout-based regression and checkpoint-selection harness — sim tracks the real success-vs-training-iteration curve and peaks at the same checkpoint. **That is the durable commercial value of your sim, independent of whether it ever settles the architecture question.**
-- **Keep every sim rollout state-only where possible.** Physics is 950× cheaper than pixels on this box.
+**따라서:**
+- **무엇이든 돌리기 전에 결정 규칙을 사전 등록(pre-register)하라.** 시뮬 판정은 효과가 **>15–20pp**이고, **≥8–10개의 상이한 태스크**와 **≥3 시드**에서 성립하며, **동역학 랜덤화 스윕을 통과**할 때만 신뢰하라(마찰 ×[0.5, 2.0]; 추가 제어 latency 0–100 ms; 컨트롤러 게인 오차 ±30%; 그리퍼 힘 ±30%; hand-eye extrinsic 노이즈 5–10 mm / 1–2°). 스윕 어디서든 순위가 뒤집히면 시뮬은 당신의 질문에 답할 수 없다.
+- **이른 하드웨어 체크포인트를 끼워 넣어라.** 태스크 2–3개, 각 실기체 데모 ~50, 두 아키텍처 모두, 아키텍처당 실기체 평가 ~100 에피소드. 시뮬과 실기체가 *순위*에서 일치하면, 나머지에 대해 시뮬을 신뢰할 자격을 얻은 것이다. 불일치하면 시뮬은 개발 도구일 뿐이다. **하드웨어를 만지기 전에 시뮬만 6개월 돌리지 마라.**
+- **zero-shot 전이가 아니라 co-training을 계획하라.** RSS 2025 레시피: 시뮬 데모 4,000 + 실기체 데모 40–400 → **6개 태스크 / 2개 embodiment(양팔 휴머노이드 포함) 평균 +37.9%**; 디지털 커즌(digital cousins) + 사전 시뮬 데이터로 실기체 전용 31% → 76%; 이점은 실기체 데모 400개에서도 지속. 모든 시뮬 태스크를 **동일한 성공 판정 기준**의 실기체 태스크와 미러링하라(그것이 카메라 포즈 매칭보다 더 중요했다). 시뮬:실기체 약 10:1에서 100:1을 겨냥하고 비율을 명시적으로 튜닝하라. *(RoboTwin의 대표 "+367% few-shot" 수치는 의도적으로 약한 10-데모 baseline 대비 상대 이득이다 — 이것을 기준으로 예산을 잡지 마라.)*
+- **checkpoint를 검증 손실로 고르지 마라.** 검증 MSE: MMRV 0.375, r 0.308. 시뮬 rollout 성공률: MMRV 0.056, r 0.924. 시뮬레이터를 영구적인 rollout 기반 회귀·checkpoint 선택 하니스로 구축하라 — 시뮬은 실기체의 성공률-학습반복 곡선을 추적하고 같은 checkpoint에서 정점을 찍는다. **그것이 아키텍처 질문을 영영 결판내지 못하더라도 남는, 시뮬의 지속적인 상업 가치다.**
+- **가능한 한 모든 시뮬 rollout을 상태 전용으로 유지하라.** 이 머신에서 물리는 픽셀보다 950× 싸다.
 
-**Statistical power (whole-machine budget, since rendering does not parallelize).** Two-proportion test, α=0.05, power 0.80, 50% baseline:
+**통계적 검정력 (렌더링이 병렬화되지 않으므로 머신 전체 예산).** 두 비율 검정, α=0.05, 검정력 0.80, baseline 50%:
 
-| Effect to detect | Episodes / arch / task | Mac wall clock, 2 arches |
+| 검출할 효과 | 에피소드 / 아키텍처 / 태스크 | Mac 벽시계, 아키텍처 2개 |
 |---|---|---|
-| 5 pt | 1,565 | ~13 h/task |
-| 10 pt | 388 | ~3.3 h/task |
-| 15 pt | 170 | ~1.5 h/task |
-| 20 pt | 93 | ~0.8 h/task |
+| 5 pt | 1,565 | ~13 h/태스크 |
+| 10 pt | 388 | ~3.3 h/태스크 |
+| 15 pt | 170 | ~1.5 h/태스크 |
+| 20 pt | 93 | ~0.8 h/태스크 |
 
-A 10-task × 3-seed comparison at 10-pt sensitivity ≈ **4 days of continuous Mac mini time**. Affordable once; not affordable to iterate on. Move the sweep to the rented box.
+10 태스크 × 3 시드 비교를 10pt 감도로 하면 ≈ **Mac mini 연속 가동 4일**. 한 번은 감당 가능하지만, 반복(iterate)은 불가. 스윕은 임대 박스로 옮겨라.
 
-**Biggest unquantified risk in the whole sim plan:** whether a well-tuned MJCF/URDF with accurate inertias, joint limits and gripper geometry exists for your actual arms. Verify this before committing to sim-first. It is a common silent blocker and it gates everything above.
+**시뮬 계획 전체에서 가장 큰 미정량 리스크:** 실제 팔에 대해 정확한 관성, 관절 한계, 그리퍼 지오메트리를 갖춘 잘 튜닝된 MJCF/URDF가 존재하는가. 시뮬 우선으로 확정하기 전에 검증하라. 흔한 조용한 blocker이고, 위의 모든 것을 게이팅한다.
 
 ---
 
-## 7. Phased roadmap with GO/NO-GO gates
+## 7. GO/NO-GO 게이트가 있는 단계별 로드맵
 
-### STAGE 1 — DECIDE (weeks 1–10)
+### STAGE 1 — 결정 (1–10주차)
 
-Weeks 1–2 are a measurement preflight; nothing about the architecture is locked until G0 passes.
+1–2주차는 측정 preflight다; G0가 통과되기 전에는 아키텍처의 어떤 것도 잠기지 않는다.
 
-**Do:** the three week-one benchmarks (§9); rent the Linux/NVIDIA box; put inference behind `Policy.infer(obs) → ActionChunk`; verify/author the MJCF; reproduce ACT's sim baseline as harness validation; freeze interface spec v0.1 and the logging schema; order the active-motor bimanual rig; pre-register the decision rule; sysID as soon as arms arrive; collect 90 real episodes on one task; run the three-way sim ablation — **(a)** monolithic ACT joint-space, **(b)** the two-model split with FK-derived labels, **(c)** Head A in relative-pose space + analytic QP-IK.
+**할 일:** 1주차의 세 벤치마크(§9); Linux/NVIDIA 박스 임대; 추론을 `Policy.infer(obs) → ActionChunk` 뒤로 이동; MJCF 검증/저작; 하니스 검증으로 ACT 시뮬 baseline 재현; 인터페이스 스펙 v0.1과 로깅 스키마 동결; 능동 모터 양팔 리그 발주; 결정 규칙 사전 등록; 팔 도착 즉시 sysID; 한 태스크에서 실기체 90 에피소드 수집; 3원 시뮬 ablation 실행 — **(a)** monolithic ACT 관절 공간, **(b)** FK 유도 레이블의 2모델 분리, **(c)** 상대 포즈 공간의 Head A + 해석적 QP-IK.
 
-**GATE G0 (end of week 2) — hard, kills the local-both-models premise:**
-- Two MLX models concurrent on the GPU: each model's p50/p99/**p99.9** solo vs together. **NO-GO if the fast head's p99.9 exceeds 3× its control period when the slow head is running.**
-- 24 h periodic 100 Hz thread, `mach_absolute_time` histogram, Spotlight + Time Machine active. **NO-GO for any macOS-hosted control loop if p99.9 > 10 ms.** (Expect it to fail. That is the point — it produces the written evidence for the two-box architecture.)
-- Real vision encoder at real resolution and camera count. **NO-GO on 3 cameras or 448² if it pushes H3 past 110 ms.**
+**GATE G0 (2주차 말) — 하드 게이트, 로컬 두-모델 전제를 죽인다:**
+- GPU에서 MLX 모델 두 개 동시 실행: 각 모델의 p50/p99/**p99.9**를 단독 vs 동시로. **느린 head가 도는 동안 빠른 head의 p99.9가 제어 주기의 3×를 넘으면 NO-GO.**
+- 24시간 주기 100 Hz 스레드, `mach_absolute_time` 히스토그램, Spotlight + Time Machine 활성 상태. **p99.9 > 10 ms면 macOS 호스팅 제어 루프 일체 NO-GO.** (실패를 예상하라. 그것이 요점이다 — 두-박스 아키텍처의 서면 증거를 만들어 준다.)
+- 실제 해상도·실제 카메라 수의 실제 비전 인코더. **카메라 3대 또는 448²가 H3를 110 ms 너머로 밀면 NO-GO.**
 
-**GATE G1 (end of week 10) — architecture decision:**
-- Harness validated: ACT reproduces published sim baselines (86% Transfer Cube / 32% Insertion, 50 scripted demos) within ±10 pp.
-- **Vision-ablation on Model B: zeroing/shuffling its non-interface inputs must cost ≥20 pp rollout success. If it costs <5 pp, Model B is a learned IK solver → KILL the learned low level, ship analytic QP-IK.**
-- **Pose-perturbation at 10 mm / 3°: ≤10 pp success drop.** If >25 pp, the metric interface is too brittle → move to a latent-primary interface.
-- Split beats monolithic ACT by **≥15 pp absolute** on **≥8 tasks**, **≥3 seeds**, and the ranking **survives the full dynamics sweep**.
-- **Rank agreement between sim and real on 2–3 tasks × 100 real eval episodes.** Disagreement → sim is demoted to a development tool for the remainder of the program.
-- Measured Cartesian stiffness on file; internal-wrench regime classified (slip vs crush).
+**GATE G1 (10주차 말) — 아키텍처 결정:**
+- 하니스 검증: ACT가 공개 시뮬 baseline(Transfer Cube 86% / Insertion 32%, 스크립트 데모 50개)을 ±10pp 안에서 재현.
+- **Model B 비전 ablation: 비인터페이스 입력을 zero/셔플했을 때 rollout 성공률이 ≥20pp 떨어져야 한다. <5pp면 Model B는 학습된 IK 솔버 → 학습 하위 계층 KILL, 해석적 QP-IK 출하.**
+- **10 mm / 3° 포즈 섭동: 성공률 하락 ≤10pp.** >25pp면 계량적 인터페이스가 너무 취약하다 → latent 1차 인터페이스로 이동.
+- 분리가 monolithic ACT를 **≥8개 태스크**, **≥3 시드**에서 **절대치 ≥15pp**로 이기고, 순위가 **전체 동역학 스윕을 통과**.
+- **태스크 2–3개 × 실기체 평가 100 에피소드에서의 시뮬-실기체 순위 일치.** 불일치 → 프로그램 잔여 기간 동안 시뮬은 개발 도구로 강등.
+- 측정된 Cartesian stiffness 서류화; internal wrench 체제 분류(슬립 vs 크러시).
 
-**NO-GO consequence:** if G1 fails on the ≥15 pp criterion, ship the monolith with a subtask-level high level and analytic QP-IK. That is a *good* outcome — it saves you two training pipelines and a compatibility matrix.
+**NO-GO 귀결:** G1이 ≥15pp 기준에서 실패하면, 서브태스크 수준 상위 계층 + 해석적 QP-IK의 monolith를 출하하라. 그것은 *좋은* 결과다 — 학습 파이프라인 두 벌과 호환성 매트릭스를 아껴 준다.
 
-### STAGE 2 — ONE TASK TO PRODUCT RELIABILITY (months 3–6)
+### STAGE 2 — 태스크 하나를 제품 신뢰성까지 (3–6개월차)
 
-**Do:** pick THE task (high labor cost, high mix so fixed automation loses, **low consequence of failure so the safety case is cheap**, fixed controllable workcell); 600–1,200 usable demos across 20–30 staging configs; 2–3 HIL/DAgger rounds; stand up the RT controller + heartbeat + safety chain; build the autonomous-rollout + success-labeling + intervention-logging flywheel; add wrist F/T; buy and read ISO 10218-1:2025 and -2:2025.
+**할 일:** 그 태스크(THE task)를 골라라(높은 인건비, 고정 자동화가 지도록 다품종(high mix), **실패의 결과가 경미해 safety case가 싼 것**, 고정되고 통제 가능한 워크셀); 스테이징 구성 20–30개에 걸친 사용 가능 데모 600–1,200; HIL/DAgger 2–3라운드; RT 컨트롤러 + heartbeat + 안전 체인 구축; 자율 rollout + 성공 레이블링 + 개입 로깅 플라이휠 구축; 손목 F/T 추가; ISO 10218-1:2025와 -2:2025 구매 및 정독.
 
 **GATE G2:**
-- **≥95% per-cycle success over ≥200 consecutive cycles**, unattended.
-- **MTBI ≥100 cycles and ≥2 hours** of unattended operation. *(This, not success rate, is the number that gates a sale.)*
-- Cycle time ≤2× human. (Reliability buys the right to be slow: DYNA-1 was accepted at 60% of human throughput because it ran unattended.)
-- **Zero policy-caused safety-chain trips per 500 cycles**; internal wrench within the measured limit for your rig.
-- End-to-end sensor→motion p99.9 ≤250 ms, continuously instrumented.
-- The A→B interface has not changed version since G1. (If it has, you do not have the update-cadence benefit you are pitching.)
+- 무인으로 **≥200 연속 사이클에서 사이클당 성공률 ≥95%**.
+- 무인 가동 **MTBI ≥100 사이클 및 ≥2시간**. *(판매를 게이팅하는 숫자는 성공률이 아니라 이것이다.)*
+- 사이클 타임 ≤ 사람의 2×. (신뢰성이 느릴 권리를 산다: DYNA-1은 무인으로 돌았기에 사람 처리량의 60%로도 수용됐다.)
+- **500 사이클당 정책 유발 안전 체인 트립 0회**; internal wrench가 리그의 측정된 한계 이내.
+- End-to-end 센서→모션 p99.9 ≤250 ms, 상시 계측.
+- A→B 인터페이스가 G1 이후 버전이 바뀌지 않았을 것. (바뀌었다면, 피치하고 있는 업데이트 주기의 이점은 존재하지 않는 것이다.)
 
-### STAGE 3 — PRODUCTIZE (months 7–12+)
+### STAGE 3 — 제품화 (7–12+개월차)
 
-**Do:** migrate the inference host to Jetson (Orin now, Thor if you need headroom) — the `Policy.infer` boundary makes this a config change; 3–5 tasks; per-customer LoRA on the high level only; RaaS with a teleop-assist fallback from v1 (how 1X and Chef take revenue before the model clears 99%, and it doubles as your data channel); Recap-style RL on autonomous experience; written safety case + CE gap analysis against **EU Machinery Regulation 2023/1230, mandatory 20 Jan 2027.**
+**할 일:** 추론 호스트를 Jetson으로 이관(지금은 Orin, 여유가 필요하면 Thor) — `Policy.infer` 경계 덕에 설정 변경이다 *(참고: 이후 REV.2에서 추론은 Galbot G1 탑재 AGX Orin으로 확정됨)*; 태스크 3–5개; 상위 계층에만 고객별 LoRA; v1부터 텔레옵 지원 폴백을 갖춘 RaaS(1X와 Chef가 모델이 99%를 넘기 전에 매출을 얻는 방식이고, 데이터 채널도 겸한다); 자율 경험에 대한 Recap식 RL; 서면 safety case + **EU 기계류 규정 2023/1230(2027년 1월 20일 의무화)** 대비 CE 격차 분석.
 
 **GATE G3:**
-- **≥99% per-cycle over ≥700 consecutive cycles** (the DYNA-1 shape), **MTBI ≥4 h unattended**, **on product compute, not the Mac.**
-- ≥3 tasks at that bar, with per-customer finetuning demonstrated end-to-end on at least one.
-- Safety case reviewed by a notified body or competent external assessor; ISO 10218-1/-2:2025 gap list closed or scheduled.
-- Product BOM contains **no component without a published lifecycle commitment.**
+- **≥700 연속 사이클에서 사이클당 ≥99%**(DYNA-1의 형태), **무인 MTBI ≥4시간**, **제품 컴퓨트에서 — Mac이 아니라.**
+- 그 기준을 넘는 태스크 ≥3개, 그중 최소 하나에서 고객별 fine-tuning을 end-to-end로 시연.
+- 인증기관(notified body) 또는 유능한 외부 평가자의 safety case 검토; ISO 10218-1/-2:2025 격차 목록 종결 또는 일정 확정.
+- 제품 BOM에 **공개된 수명주기 약속이 없는 부품 0개.**
 
 ---
+## 8. 상위 리스크 5, 순위별
 
-## 8. Top 5 risks, ranked
+**R1 — Label leakage → Model B가 학습된 IK 솔버가 되고, 하드웨어에서야 발견된다.** *(확률 높음, 영향 파국적, 해당 진단 없이는 검출 가능성 거의 0.)*
+→ 비전 ablation과 포즈 섭동 테스트를 **무엇이든 만들기 전에** 실행하라(G1 기준). 학습된 하위 계층이 IK에 없는 정보를 갖도록 서보 전류/토크와 손목 F/T를 로깅하라. 계량적 인터페이스가 살아남으면 수집 시점에 독립 EE 포즈 채널(VR/AprilTag)을 추가하라. Model B를 대체물이 아니라 **해석적 QP-IK 위의 residual**로 구현하라. scheduled sampling + hindsight relabeling + DART 노이즈 + latency matching + joint fine-tuning을 그 비용 순서대로 적용하라. **v1은 해석적 QP-IK 하위 계층으로 출하하고, 학습 버전은 측정된 승리 뒤로 게이팅하라** — 이렇게 하면 하위 계층이 시뮬 전이 크리티컬 패스에서 완전히 빠진다.
 
-**R1 — Label leakage → Model B is a learned IK solver, discovered on hardware.** *(Probability high, impact catastrophic, detectability near-zero without the specific diagnostics.)*
-→ Run the vision-ablation and pose-perturbation tests **before building anything** (G1 criteria). Log servo current/torque and wrist F/T so a learned low level has information IK lacks. Add an independent EE-pose channel (VR/AprilTag) at collection time if the metric interface survives. Implement Model B as a **residual on top of analytic QP-IK**, not a replacement. Apply scheduled sampling + hindsight relabeling + DART noise + latency matching + joint finetuning, in that cost order. **Ship v1 with the analytic QP-IK low level and gate the learned version behind a measured win** — this removes the low level from the sim-transfer critical path entirely.
+**R2 — Mac mini는 출하 가능한 제품 컴퓨트가 아니다; 팀은 9개월차에 이를 발견한다.** *(확률 확실, 영향 = 최소 한 분기 손실.)*
+→ 여섯 개의 독립 실격 사유: EULA §8E 상해 면책 + §2J 재배포 금지·OEM 프로그램 부재; 10–35 °C / 무필터 흡기 / AC 전용; RT 커널 없음; ROS 2 Tier 3, amd64 전용; BMC/watchdog/시리얼 콘솔 없음, 업데이트 유예 최대 90일; **수명주기 약속 없음 — 64 GB SKU는 이미 2026년 6월 주기 중간에 사라졌다.** 완화책은 싸고 즉각적이다: 이번 주에 `Policy.infer` 경계 + 네트워크 분리 추론 호스트; 제품 기준선으로 Jetson AGX Orin 64 GB(275 TOPS, 204.8 GB/s, −25/+80 °C, DC 입력, ROS 2 Tier 1, JetPack의 PREEMPT_RT, **2032년 1월까지 생산**). Mac은 개발 머신으로 유지하라 — 그 용도로는 진짜 좋다. ROS 2 작업은 네이티브가 아니라 arm64 Ubuntu Docker에서 하라.
 
-**R2 — Mac mini is not shippable product compute; the team discovers this in month 9.** *(Probability certain, impact = one lost quarter minimum.)*
-→ Six independent disqualifiers: EULA §8E injury disclaimer + §2J redistribution ban with no OEM program; 10–35 °C / unfiltered intake / AC-only; no RT kernel; ROS 2 Tier 3, amd64 only; no BMC/watchdog/serial console, 90-day max update deferral; **no lifecycle commitment — the 64 GB SKU already vanished mid-cycle in June 2026.** Mitigation is cheap and immediate: `Policy.infer` boundary + network-separated inference host this week; Jetson AGX Orin 64 GB (275 TOPS, 204.8 GB/s, −25/+80 °C, DC input, ROS 2 Tier 1, PREEMPT_RT in JetPack, **production through Jan 2032**) as the product baseline. Keep the Mac as the dev box — it is genuinely good at that. Do ROS 2 work in arm64 Ubuntu Docker, never natively.
+**R3 — 데이터 경제성이 타임라인을 날린다.** *(범위가 "범용 양팔"에 머물면 확률 높음.)*
+→ 3–5 태스크로 강하게 재범위화하라. 볼륨이 아니라 **다양성**(`장면 × 물체 × 30–50 데모`)으로 예산을 잡아라. **from scratch로 학습하지 마라** — SmolVLA(~450M, Apache-2.0, Apple Silicon에서 쓸 만한 Hz에 도달할 그럴듯한 경로를 가진 유일한 급), openpi 경유 π0/π0.5, 또는 GR00T N1.x를 fine-tuning하라. 그것이 태스크당 100–500 데모가 필요한 것과 수천 개가 필요한 것의 차이다. **openpi와 GR00T의 상업 라이선스 조건은 그 위에 제품을 짓기 전에 검증하라**(SmolVLA, OpenVLA는 Apache-2.0, Octo는 MIT로 깨끗하다). 에피소드 1 전에 오퍼레이터 프로토콜을 작성하고 강제하라: 물체당 하나의 canonical 파지 전략, 고정 마운트, 고정 조명, 고정 리셋 — 동일 데모 수에서의 스크립트-vs-사람 격차(86%→50%, 32%→20%)가 오퍼레이터 확률성의 측정된 비용이고, 문서화된 SO-100 60 에피소드 실패 사례는 시각적으로 동일한 상태에서 톱다운 파지와 사이드 핀치 파지를 섞은 것이 원인이었다.
 
-**R3 — Data economics blow up the timeline.** *(Probability high if scope stays at "general-purpose bimanual.")*
-→ Rescope to 3–5 tasks, hard. Budget by **diversity** (`scenes × objects × 30–50 demos`), not volume. **Do not train from scratch** — finetune SmolVLA (~450M, Apache-2.0, the only class with a plausible path to useful Hz on Apple Silicon), π0/π0.5 via openpi, or GR00T N1.x. That is the difference between needing 100–500 demos/task and needing thousands. **Verify openpi and GR00T commercial license terms before building a product on them** (SmolVLA, OpenVLA Apache-2.0 and Octo MIT are clean). Write and enforce an operator protocol before episode 1: one canonical grasp strategy per object, fixed mounts, fixed lighting, fixed reset — the scripted-vs-human gap at identical demo counts (86%→50%, 32%→20%) is the measured cost of operator stochasticity, and a documented 60-episode SO-100 failure was caused by mixing top-down and side-pinch grasps on visually identical states.
+**R4 — 신뢰성 천장: 순수 모방은 상업 기준선보다 한참 아래에서 정체한다.** *(확률 높음 — 업계가 명시적으로 밝힌 경험이지, 추측이 아니다.)*
+→ 플라이휠을 첫날부터 만들고 아키텍처 분리보다 우선순위를 높게 다뤄라: 자율 rollout, 성공 레이블링, 가치/크리틱 head, 그리고 모든 개입에서의 전체 관측 윈도 캡처. 스프린트 1부터 MTBI를 북극성 지표로 삼아라. Head A에 first-class `{CONTINUE, RETRY, ABORT, REQUEST_TELEOP}` 출력을 줘라. 모델이 99%를 넘기 전에 팔 수 있도록 v1에 텔레옵 지원 폴백을 실어라. 누적 오차는 산수다: 0.95¹⁰ ≈ 0.60, 그리고 어떤 파라미터 재배분도 지수를 바꾸지 못한다 — 감지와 복구만이 바꾼다.
 
-**R4 — Reliability ceiling: pure imitation plateaus far below the commercial bar.** *(Probability high — this is the industry's stated experience, not speculation.)*
-→ Build the flywheel from day one and treat it as higher-priority than the architecture split: autonomous rollouts, success labeling, a value/critic head, and full observation-window capture on every intervention. Make MTBI the north-star metric from sprint 1. Give Head A a first-class `{CONTINUE, RETRY, ABORT, REQUEST_TELEOP}` output. Ship teleop-assist fallback in v1 so you can sell before the model clears 99%. Compound error is the arithmetic: 0.95¹⁰ ≈ 0.60, and no parameter reallocation changes the exponent — only detection and recovery does.
-
-**R5 — Closed-chain internal wrench, and the safety/certification gap behind it.** *(Probability moderate, impact severe and possibly hardware-destroying.)*
-→ Measure your rig's Cartesian stiffness in week 1: it determines whether constraint violation manifests as slipping (cheap, compliant arms) or crushing/e-stop (stiff arms) — and those demand different mitigations. Implement the coordination-mode reparameterization so the 6 excess DoF are **structurally eliminated** in TIGHTLY_COUPLED, not regressed. Predict `T_left→right` directly, never by subtraction. Add wrist F/T or current-based external-force estimation as both a policy input and a hard RT-layer threshold — it is the fastest detector of the jam/crush/collision failures that produce unrecoverable errors, and it is required anyway for power-and-force limiting. **Choose arms that ship a certified safety controller before collecting data**, because your data is embodiment-specific and re-collecting it is the most expensive mistake available to you.
+**R5 — 폐체인 internal wrench, 그리고 그 뒤의 안전/인증 격차.** *(확률 중간, 영향 심각하며 하드웨어 파괴 가능.)*
+→ 1주차에 리그의 Cartesian stiffness를 측정하라: 구속 위반이 미끄러짐(저렴, 컴플라이언트 팔)으로 나타날지 으스러짐/e-stop(강성 팔)으로 나타날지를 결정하며, 둘은 서로 다른 완화책을 요구한다. TIGHTLY_COUPLED에서 초과 6 DoF가 회귀되는 게 아니라 **구조적으로 제거**되도록 협조 모드 재파라미터화를 구현하라. `T_left→right`는 직접 예측하고, 절대 뺄셈으로 만들지 마라. 손목 F/T 또는 전류 기반 외력 추정을 정책 입력이자 RT 계층의 하드 임계값으로 추가하라 — 복구 불가능한 오류를 만드는 잼/크러시/충돌 실패의 가장 빠른 검출기이고, 어차피 power-and-force limiting에 필요하다. **데이터를 수집하기 전에 인증된 안전 컨트롤러가 딸린 팔을 골라라.** 데이터는 embodiment 특정적이고, 재수집은 당신이 저지를 수 있는 가장 비싼 실수다.
 
 ---
 
 ## 9. STOP / START
 
-### STOP considering — immediately
+### STOP — 즉시 고려 중단
 
-- **Two independent 6-DoF pose targets as the interface.** Geometry, not tuning: 6 excess DoF that can only become internal wrench.
-- **Absolute pose anywhere in the interface.** UMI 100% relative vs 25% absolute; SRT ~0% absolute.
-- **Head-relative as the interface frame.** Input feature to Head A only. Sim will never show you the calibration penalty.
-- **Model B consuming RGB.** It duplicates the most expensive component and caps you at ~5 Hz. A cerebellum that re-encodes pixels is a second cerebrum.
-- **"Split capacity to improve performance" as the justification.** No supporting evidence exists. Replace with the *data* argument (Head A absorbs sim/cross-embodiment/human data; only Head B needs your scarce demos) and the *rate/horizon* argument (proven: Helix, GR00T, π0.5) and the *commercial* arguments (update cadence, per-customer finetuning, logged interpretable interface).
-- **Two separately trained models with a permanently frozen non-differentiable pose API.** Use one checkpoint, shared vision encoder, **stop-gradient** at the boundary (Knowledge Insulation), with joint finetuning as the final polish.
-- **"Both models must run locally on the Mac mini" as a design constraint.** It is not a requirement; it is an assumption that is actively distorting the architecture.
-- **Mac mini as product compute.** And stop planning to train anything on it beyond the first single-task prototype.
-- **Per-embodiment low-level swap** and **smaller OTA** as pitch points. Both are stale; a DD reviewer will mark them.
-- **50 tasks / general-purpose framing.** ~3,000 human-hours, $200k–500k DIY, 9–27 months.
-- **MJX, Isaac Lab, MuJoCo Playground/Warp, RoboTwin locally.** Confirmed unavailable; stop trying.
-- **Validation MSE as a checkpoint-selection or decision metric.** MMRV 0.375, r 0.308 — nearly useless.
-- **Binary grippers. Per-step (k=1) interfaces. Asynchronous per-arm streams. Passive GELLO leaders. A single global camera.** Each is independently disqualifying.
+- **인터페이스로서의 독립 6-DoF 포즈 목표 두 개.** 튜닝이 아니라 기하학: internal wrench로만 변할 수 있는 초과 6 DoF.
+- **인터페이스 어디에든 절대 포즈.** UMI relative 100% vs absolute 25%; SRT absolute ~0%.
+- **인터페이스 프레임으로서의 head 기준 상대 좌표.** Head A의 입력 피처로만. 시뮬은 그 캘리브레이션 벌점을 절대 보여주지 않는다.
+- **Model B의 RGB 소비.** 가장 비싼 컴포넌트를 복제하고 ~5 Hz에 캡을 씌운다. 픽셀을 다시 인코딩하는 소뇌는 두 번째 대뇌다.
+- **정당화로서의 "성능을 위해 용량을 분리한다".** 지지 증거가 존재하지 않는다. *데이터* 논거(Head A는 시뮬/cross-embodiment/사람 데이터를 흡수; Head B만 희소한 데모가 필요)와 *rate/horizon* 논거(입증됨: Helix, GR00T, π0.5)와 *상업* 논거(업데이트 주기, 고객별 fine-tuning, 로깅되는 해석 가능한 인터페이스)로 교체하라.
+- **영구 동결된 비미분(non-differentiable) 포즈 API를 사이에 둔, 따로 학습되는 두 모델.** 하나의 checkpoint, 공유 비전 인코더, 경계에 **stop-gradient**(Knowledge Insulation), 마지막 다듬기로 joint fine-tuning.
+- **설계 제약으로서의 "두 모델 모두 Mac mini 로컬 실행".** 요구사항이 아니라, 아키텍처를 능동적으로 왜곡하고 있는 가정이다.
+- **제품 컴퓨트로서의 Mac mini.** 그리고 첫 단일 태스크 프로토타입 이후로는 그 위에서 무언가를 학습시키려는 계획도 중단하라.
+- **피치 포인트로서의 embodiment별 하위 계층 교체와 더 작은 OTA.** 둘 다 낡았다; DD 검토자가 표시할 것이다.
+- **50 태스크 / 범용 프레이밍.** 인력 ~3,000시간, DIY $200k–500k, 9–27개월.
+- **로컬에서의 MJX, Isaac Lab, MuJoCo Playground/Warp, RoboTwin.** 사용 불가 확인됨; 그만 시도하라.
+- **checkpoint 선택 혹은 결정 지표로서의 검증 MSE.** MMRV 0.375, r 0.308 — 거의 무용.
+- **이진 그리퍼. 스텝별(k=1) 인터페이스. 비동기 팔별 스트림. 수동 GELLO 리더. 단일 전역 카메라.** 각각이 독립적으로 실격 사유다.
 
-### START this week — five days, concrete
+### START — 이번 주, 5일, 구체적으로
 
-**Day 1 — the three benchmarks that settle most remaining arguments empirically and cheaply.**
-(a) Two MLX models concurrent on the GPU: p50/p99/p99.9 solo vs together. (b) A periodic 100 Hz thread with `mach_absolute_time`, histogram logged over 24 h with Spotlight and Time Machine active — this is your written real-time evidence. (c) Your actual vision encoder at your actual resolution and camera count. Run `PYTORCH_ENABLE_MPS_FALLBACK` **off** in CI from today so missing ops fail loudly.
+**Day 1 — 남은 논쟁 대부분을 경험적으로, 값싸게 결판내는 세 벤치마크.**
+(a) GPU에서 MLX 모델 두 개 동시 실행: p50/p99/p99.9 단독 vs 동시. (b) `mach_absolute_time`을 쓰는 주기 100 Hz 스레드, Spotlight와 Time Machine이 켜진 상태로 24시간 히스토그램 로깅 — 이것이 당신의 서면 실시간 증거다. (c) 실제 해상도·실제 카메라 수의 실제 비전 인코더. 오늘부터 CI에서 `PYTORCH_ENABLE_MPS_FALLBACK`을 **꺼서** 누락된 op가 시끄럽게 실패하게 하라.
 
-**Day 1–2 — decouple the hardware decision while it is still free.** Put all inference behind `Policy.infer(obs) → ActionChunk` with MLX and TensorRT implementations, and put the inference host behind a network interface. Rent the Linux + NVIDIA box. Adopt the two-box architecture in simulation *before* touching hardware.
+**Day 1–2 — 아직 공짜일 때 하드웨어 결정을 분리하라.** 모든 추론을 MLX·TensorRT 구현을 갖춘 `Policy.infer(obs) → ActionChunk` 뒤에 두고, 추론 호스트를 네트워크 인터페이스 뒤에 두어라. Linux + NVIDIA 박스를 임대하라. 하드웨어를 만지기 *전에* 시뮬레이션에서 두-박스 아키텍처를 채택하라.
 
-**Day 2–3 — verify the MJCF for your target arms exists and is trustworthy** (inertias, joint limits, gripper geometry). Then reproduce ACT's published sim baseline (86% / 32%) as harness validation. Do not proceed to any ablation until the harness reproduces a known number.
+**Day 2–3 — 대상 팔의 MJCF가 존재하고 신뢰할 만한지 검증하라**(관성, 관절 한계, 그리퍼 지오메트리). 그 다음 하니스 검증으로 ACT의 공개 시뮬 baseline(86% / 32%)을 재현하라. 하니스가 알려진 숫자를 재현하기 전에는 어떤 ablation으로도 나아가지 마라.
 
-**Day 3 — write and freeze interface spec v0.1 (§4) and the logging schema (§5.3).** RDT's 128-dim layout + servo current/torque + hardware timestamps on one monotonic clock + intervention labels + coordination mode + calibration snapshot. This document is the product asset that makes independent update cadence and per-customer finetuning real. Version it with semver from today.
+**Day 3 — 인터페이스 스펙 v0.1(§4)과 로깅 스키마(§5.3)를 작성하고 동결하라.** RDT의 128차원 레이아웃 + 서보 전류/토크 + 하나의 단조 클록 위 하드웨어 타임스탬프 + 개입 레이블 + 협조 모드 + 캘리브레이션 스냅샷. 이 문서가 독립 업데이트 주기와 고객별 fine-tuning을 현실로 만드는 제품 자산이다. 오늘부터 semver로 버저닝하라.
 
-**Day 4 — commit the hardware.** Active-motor bimanual leader-follower (HIL/DAgger requires torque-controllable leaders — this cannot be retrofitted). Two wrist cameras plus 1–2 scene cameras, fixed mounts, fixed lighting. For the product path, arms that ship a certified safety controller. Order it. In parallel, buy ISO 10218-1:2025 and -2:2025 (~$244 each) and read the functional-safety and power-and-force-limiting sections yourself.
+**Day 4 — 하드웨어를 확정하라.** 능동 모터 양팔 리더-팔로워(HIL/DAgger는 토크 제어 가능한 리더를 요구한다 — 사후 장착 불가). 손목 카메라 2대 + 장면 카메라 1–2대, 고정 마운트, 고정 조명. 제품 경로에는 인증된 안전 컨트롤러가 딸린 팔. 발주하라. 병행하여 ISO 10218-1:2025와 -2:2025(각 ~$244)를 구매해 기능 안전과 power-and-force limiting 절을 직접 읽어라.
 
-**Day 4–5 — pick THE task,** using the Chef/Dyna filter: high labor cost, high mix (so fixed automation loses), **low consequence of failure** (so the safety case is cheap and a protective stop is acceptable), fixed and controllable workcell. Design the architecture backwards from it.
+**Day 4–5 — 그 태스크(THE task)를 골라라.** Chef/Dyna 필터로: 높은 인건비, 다품종(고정 자동화가 지도록), **실패의 결과 경미**(safety case가 싸고 보호 정지가 수용 가능하도록), 고정되고 통제 가능한 워크셀. 아키텍처를 그 태스크에서 역방향으로 설계하라.
 
-**Day 5 — pre-register the decision rule in writing before running anything:** which tasks, how many episodes, how many seeds, what effect size counts as a win, and what the dynamics sweep is. Report confidence intervals, not point estimates. Write down in advance that a NO-GO at G1 means shipping the monolith + analytic QP-IK, and that this is an acceptable outcome.
+**Day 5 — 무엇이든 돌리기 전에 결정 규칙을 서면으로 사전 등록하라:** 어떤 태스크, 몇 에피소드, 몇 시드, 어떤 효과 크기를 승리로 인정하는지, 동역학 스윕은 무엇인지. 점 추정이 아니라 신뢰구간(CI)을 보고하라. G1에서 NO-GO가 나오면 monolith + 해석적 QP-IK를 출하한다는 것, 그리고 그것이 수용 가능한 결과라는 것을 미리 적어 두어라.
 
-**Also this week:** plan the sysID protocol (joint stiffness, damping, friction, actuator lag, control latency and jitter, gripper force curve, and **Cartesian stiffness**) to execute the day the arms arrive.
+**이번 주에 또:** 팔이 도착하는 날 실행할 sysID 프로토콜(관절 stiffness, damping, 마찰, 액추에이터 지연, 제어 latency와 jitter, 그리퍼 힘 곡선, 그리고 **Cartesian stiffness**)을 계획하라.
 
 ---
 
-## 10. Where the research is thin, contradictory, or estimated
+## 10. 리서치가 얇거나, 모순되거나, 추정인 지점
 
-**State this section to the team verbatim. Several load-bearing numbers are not measurements.**
+**이 절은 팀에게 그대로(verbatim) 전달하라. 하중을 받치는 숫자 여러 개가 측정치가 아니다.**
 
-**The central question is unanswered in the literature.** There is **no published head-to-head** of "explicit 6-DoF pose interface between two learned models" vs "latent interface" vs "monolithic joint-space policy" on the same bimanual robot and task suite. PerAct2's 16.8% — the strongest negative evidence — is confounded with keyframe discretization, a sampling-based motion planner, single-demo real-world evaluation, and the RLBench2 sim. **Treat the anti-pose verdict as a well-supported prior, not a proven result. It is also the single highest-value experiment you could run, and it is cheap in sim.**
+**중심 질문은 문헌에 답이 없다.** 같은 양팔 로봇·태스크 스위트에서 "두 학습 모델 사이의 명시적 6-DoF 포즈 인터페이스" vs "latent 인터페이스" vs "monolithic 관절 공간 정책"의 **공개된 head-to-head 비교는 없다**. 가장 강한 부정적 증거인 PerAct2의 16.8%는 키프레임 이산화, 샘플링 기반 모션 플래너, 단일 데모 실기체 평가, RLBench2 시뮬과 교란돼 있다. **반(反)포즈 판정은 근거가 탄탄한 prior로 다루되, 증명된 결과로 다루지 마라. 동시에 이것은 당신이 돌릴 수 있는 가장 가치 높은 실험이고, 시뮬에서는 싸다.**
 
-**The research contradicts itself on where the seam goes**, and this must be resolved deliberately rather than averaged. Thread 1 says *keep the split, change the interface to a latent*. Thread 2 says *the split is at the wrong seam — move it to the subtask level and use analytic IK*. Thread 3 says *one backbone, two heads, and build the QP first*. Thread 4 says *split for data reuse but train jointly*. **Resolution adopted here: there are three seams, not one.** (i) A *semantic* seam at 1–5 Hz (subtask, mode, phase, latent) — this is where the measured 2.7× hierarchical win on compositional tasks comes from. (ii) A *rate/horizon* seam at 5–10 Hz emitting 50 Hz chunks — this is Helix/GR00T and it is proven. (iii) A *determinism* seam at the RT controller — this is legally mandatory and non-negotiable. The seam the proposal specified — "where" vs "how" within a single reaching motion — is the one seam with no supporting evidence.
+**리서치는 이음새가 어디에 놓이느냐를 두고 자기모순이며**, 평균 내지 말고 의도적으로 해소해야 한다. 스레드 1은 *분리는 유지하되 인터페이스를 latent로 바꿔라*라고 말한다. 스레드 2는 *분리가 잘못된 이음새에 있다 — 서브태스크 수준으로 옮기고 해석적 IK를 써라*라고 말한다. 스레드 3은 *백본 하나, head 둘, 그리고 QP부터 만들어라*라고 말한다. 스레드 4는 *데이터 재사용을 위해 분리하되 joint로 학습하라*라고 말한다. **여기서 채택한 해소: 이음새는 하나가 아니라 셋이다.** (i) 1–5 Hz의 *시맨틱* 이음새(서브태스크, 모드, phase, latent) — 조합적(compositional) 태스크에서 측정된 2.7× 계층화 이득이 나오는 곳. (ii) 50 Hz chunk를 방출하는 5–10 Hz의 *rate/horizon* 이음새 — 이것이 Helix/GR00T이고 입증됐다. (iii) RT 컨트롤러에서의 *결정론* 이음새 — 법적으로 의무이고 협상 불가. 제안서가 명세한 이음새 — 단일 도달 동작 안에서의 "어디" vs "어떻게" — 는 지지 증거가 없는 유일한 이음새다.
 
-**The strongest unresolved counter-datapoint to the anti-pose argument:** Helix's System 1 **outputs** wrist poses (plus finger flexion/abduction and torso/head orientation) for its 35-DoF upper body. So a pose-like representation *does* appear in a working frontier bimanual system — at the *output* of the fast policy, not as the interface *into* it. I could not determine how Figure resolves the closed-chain problem for two-handed rigid carries, nor whether that wrist-pose output is backed by an impedance or whole-body-control layer. **If it is, that layer is doing work your Model B would also have to do.** This is the most important open question in the whole analysis.
+**반포즈 논거에 대한 가장 강한 미해결 반례 데이터포인트:** Helix의 System 1은 35-DoF 상체에 대해 손목 포즈(플러스 손가락 굴곡/외전, 토르소/머리 방향)를 **출력**한다. 즉 포즈류 표현이 작동하는 프론티어 양팔 시스템에 *등장하긴 한다* — 다만 빠른 정책의 *출력*으로서지, 그 안으로 들어가는 인터페이스로서가 아니다. Figure가 양손 강체 운반의 폐체인 문제를 어떻게 해소하는지, 그 손목 포즈 출력 뒤를 임피던스나 whole-body-control 계층이 받치고 있는지는 확인할 수 없었다. **만약 그렇다면, 그 계층은 당신의 Model B도 해야 할 일을 하고 있는 것이다.** 이 분석 전체에서 가장 중요한 열린 질문이다.
 
-**Estimates, not measurements — do not quote as fact:**
-- Internal force magnitudes (0.5–5 N compliant, 50–500 N stiff, for 5 mm relative error) are derived from typical Cartesian stiffness ranges. The mechanism and direction are solid; the magnitudes depend entirely on your arms. **Measure yours.**
-- **All Apple Silicon VLA latency figures** (2B VLM at 1.3–3 Hz; 7B at 0.4–0.6 Hz; 300M flow expert at 30–80 ms, ±50%) are derived from llama.cpp-calibrated constants (5.1 TFLOPS effective FP16, 190 GB/s effective on M4 Pro). **No published benchmark of any VLA on Apple Silicon exists.** Accurate to maybe ±20% for prefill-dominated work, worse for the dispatch-bound flow expert.
-- **The concurrent-two-model GPU contention figures** (~45–50% throughput each) are derived from Metal's documented command-buffer model, **not measured on your workload**. The entire dual-model-on-one-box question turns on this.
-- **macOS jitter distribution** (p99 1–3 ms, p99.9 10–50 ms) is an estimate. The direction is certain; the magnitude is not.
-- **The MuJoCo numbers in §6.1 ARE measured** on an M4 Mac mini — those you can quote.
+**추정이지 측정이 아님 — 사실로 인용하지 마라:**
+- 내부 힘 크기(5 mm 상대 오차에 대해 컴플라이언트 0.5–5 N, 강성 50–500 N)는 전형적인 Cartesian stiffness 범위에서 유도했다. 메커니즘과 방향은 견고하다; 크기는 전적으로 당신의 팔에 달렸다. **당신 것을 측정하라.**
+- **모든 Apple Silicon VLA latency 수치**(2B VLM 1.3–3 Hz; 7B 0.4–0.6 Hz; 300M flow expert 30–80 ms, ±50%)는 llama.cpp로 캘리브레이션한 상수(M4 Pro 유효 FP16 5.1 TFLOPS, 유효 190 GB/s)에서 유도했다. **Apple Silicon에서의 VLA 공개 벤치마크는 존재하지 않는다.** prefill 지배 작업에는 아마 ±20%, dispatch-bound인 flow expert에는 그보다 나쁘다.
+- **동시 두-모델 GPU 경합 수치**(각 ~45–50% 처리량)는 Metal의 문서화된 커맨드 버퍼 모델에서 유도했고, **당신의 워크로드에서 측정하지 않았다**. 한 박스 듀얼 모델 질문 전체가 여기에 달렸다.
+- **macOS jitter 분포**(p99 1–3 ms, p99.9 10–50 ms)는 추정이다. 방향은 확실하고, 크기는 아니다.
+- **§6.1의 MuJoCo 숫자들은 측정치다** — M4 Mac mini에서. 그것들은 인용해도 된다.
 
-**Data economics are partly vendor marketing.** The $25–50/h operator, 30–60 usable demos/hr, $50–150/demo and $50k–200k production-dataset figures come substantially from data-collection vendor pages. The peer-reviewed anchors (ALOHA $20k hardware; DROID's 50 collectors over 12 months) are consistent with them — reassuring, not confirming. **Episode yield rate is reported nowhere; 75% was assumed. If your real yield is 50%, every collection number rises 50%.** No source gave bimanual-specific per-demonstration cost, so the model likely *understates* bimanual cost.
+**데이터 경제성은 일부 벤더 마케팅이다.** 오퍼레이터 $25–50/h, 시간당 사용 가능 데모 30–60, 데모당 $50–150, 프로덕션 데이터셋 $50k–200k 수치는 상당 부분 데이터 수집 벤더 페이지에서 왔다. 피어리뷰 앵커(ALOHA 하드웨어 $20k; DROID의 12개월간 수집 인력 50명)는 이와 일관적이다 — 안심은 되지만 확증은 아니다. **에피소드 수율은 어디에도 보고돼 있지 않다; 75%는 가정이다. 실제 수율이 50%면 모든 수집 숫자가 50% 오른다.** 양팔 특정 데모당 비용을 준 소스는 없어서, 이 모델은 양팔 비용을 *과소평가*하고 있을 가능성이 크다.
 
-**Legal and standards inferences, not quotations:**
-- No normative standard says "a neural network cannot implement a safety function." That conclusion is inferred from ISO 13849-1:2023 / IEC 62061:2021 / IEC 61508 requirements for quantified failure rates, diagnostic coverage and systematic capability. It is the correct working assumption; get counsel before writing it in a technical file.
-- Exact ISO/TS 15066 biomechanical force/pressure limits could not be verified — the tables are inside the paid standard. Commonly cited hand/finger figures (~140 N transient, ~65 N quasi-static) appear in secondary literature and are **unverified here**.
-- The legal status of reselling a Mac mini embedded in a larger product is genuinely unsettled. First-sale likely covers the hardware; SLA §2J and §8E create real exposure. **This needs actual counsel.**
+**법·표준은 추론이지 인용이 아니다:**
+- 어떤 규범 표준도 "신경망은 안전 기능을 구현할 수 없다"고 말하지 않는다. 그 결론은 정량화된 고장률·진단 커버리지·시스템적 능력을 요구하는 ISO 13849-1:2023 / IEC 62061:2021 / IEC 61508에서 추론한 것이다. 올바른 작업 가정이다; technical file에 쓰기 전에 법률 자문을 받아라.
+- 정확한 ISO/TS 15066 생체역학 힘/압력 한계는 검증하지 못했다 — 표가 유료 표준 안에 있다. 흔히 인용되는 손/손가락 수치(순간 ~140 N, 준정적 ~65 N)는 2차 문헌에 나오며 **여기서는 미검증**이다.
+- 더 큰 제품에 임베드된 Mac mini 재판매의 법적 지위는 진짜로 미확정이다. 최초 판매 원칙(first-sale)이 하드웨어는 아마 커버할 것이다; SLA §2J와 §8E는 실질적인 exposure를 만든다. **실제 법률 자문이 필요하다.**
 
-**Verify before designing around:**
-- **RDT-1B's ALOHA deployment configuration.** I confirmed the 128-dim schema has slots for both joint positions and EEF 6-D pose, but did not find an explicit statement of which subset is populated. The joint-position conclusion is inferred from platform convention. High confidence, not verified.
-- **Bi-ACT** (bilateral control ACT, arXiv:2401.17698) predicts joint angles, angular velocities **and forces** of the leader robot — a direct force-carrying extension of ACT, highly relevant to tightly-coupled squeeze tasks. Only the abstract was readable. **If tightly-coupled squeeze is core to the product, read this in full before finalizing the interface.**
-- **AWE's bimanual ALOHA waypoint interpolation** — joint space or task space? Unconfirmed. If joint space (likely, given ALOHA's control convention), then the one successful "waypoint-like" bimanual interface is *joint*-space waypoints, further weakening the case for a Cartesian interface.
-- **Jetson AGX Thor's operating temperature range and lifecycle commitment** were not stated on NVIDIA's product page. Confirm from the module datasheet. **Do not assume Thor inherits Orin's −25/+80 °C and Jan 2032.**
-- **openpi and GR00T commercial license terms.** Unverified. Legal read required before building a product on them.
-- **Genesis's Metal backend.** Claimed, unverified. Half-day spike at most.
-- **Whether an M5-generation Mac mini exists in your purchasing window** (M5 Pro 307 GB/s / 64 GB and M5 Max 614 GB/s / 128 GB shipped in MacBook Pro only as of Mar 2026). This changes the dev-box calculus, not the product verdict.
+**설계에 반영하기 전에 검증할 것:**
+- **RDT-1B의 ALOHA 배포 구성.** 128차원 스키마에 관절 위치와 EEF 6-D 포즈 슬롯이 모두 있음은 확인했지만, 어느 부분집합이 채워지는지에 대한 명시적 서술은 찾지 못했다. 관절 위치라는 결론은 플랫폼 관례에서의 추론이다. 신뢰도는 높지만, 검증된 것은 아니다.
+- **Bi-ACT**(bilateral control ACT, arXiv:2401.17698)는 리더 로봇의 관절 각도, 각속도, **그리고 힘**을 예측한다 — ACT의 직접적인 힘 탑재 확장으로, tightly-coupled 조임 태스크에 매우 유관하다. 초록만 읽을 수 있었다. **tightly-coupled 조임이 제품 핵심이라면 인터페이스 확정 전에 전문을 읽어라.**
+- **AWE의 양팔 ALOHA waypoint 보간** — 관절 공간인가 태스크 공간인가? 미확인. 관절 공간이라면(ALOHA의 제어 관례상 유력) 유일하게 성공한 "waypoint류" 양팔 인터페이스는 *관절* 공간 waypoint라는 뜻이 되어, Cartesian 인터페이스의 논거를 더 약화시킨다.
+- **Jetson AGX Thor의 동작 온도 범위와 수명주기 약속**은 NVIDIA 제품 페이지에 명시돼 있지 않았다. 모듈 데이터시트에서 확인하라. **Thor가 Orin의 −25/+80 °C와 2032년 1월을 물려받는다고 가정하지 마라.**
+- **openpi와 GR00T의 상업 라이선스 조건.** 미검증. 그 위에 제품을 짓기 전에 법률 검토가 필요하다.
+- **Genesis의 Metal 백엔드.** 주장만 있고, 미검증. 길어야 반나절 스파이크.
+- **구매 가능 기간 안에 M5 세대 Mac mini가 존재하는가**(M5 Pro 307 GB/s / 64 GB와 M5 Max 614 GB/s / 128 GB는 2026년 3월 기준 MacBook Pro로만 출시). 이것은 개발 머신 계산을 바꾸지, 제품 판정을 바꾸지 않는다.
 
-**Genuinely unknown and consequential:** the direction of the sim-vs-real inversion for split-vs-monolith. Mechanisms argue both ways (sim's forgiving contact flatters a pose bottleneck; the monolith overfits sim dynamics quirks). No evidence establishes which dominates — **which is precisely why the early hardware checkpoint in Stage 1 is non-optional.**
+**진짜로 미지이며 결과에 중대한 것:** 분리-vs-monolith에 대한 시뮬-실기체 역전의 방향. 메커니즘은 양쪽을 다 가리킨다(시뮬의 관대한 접촉은 포즈 병목을 돋보이게 하고; monolith는 시뮬 동역학의 버릇에 과적합한다). 어느 쪽이 지배하는지 확정하는 증거는 없다 — **바로 그래서 Stage 1의 이른 하드웨어 체크포인트가 선택 사항이 아니다.**
