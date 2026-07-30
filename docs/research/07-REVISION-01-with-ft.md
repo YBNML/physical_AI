@@ -1,301 +1,303 @@
-# REVISION — Technical Review of the Two-Model Architecture
-### Supersedes the prior review. Basis: the developer's confirmed I/O diagram.
-**Evidence tags used throughout:** `[M]` measured on this machine/platform · `[PR]` peer-reviewed · `[PP]` preprint · `[V]` vendor spec · `[I]` inference/analysis (mine, not measured or published)
+# REVISION — 2모델 아키텍처 기술 리뷰 개정판
+### 이전 리뷰를 대체합니다. 근거: 개발자가 확정한 I/O 다이어그램.
+**근거 태그:** `[M]` 이 기기/플랫폼에서 실측 · `[PR]` peer-reviewed · `[PP]` preprint · `[V]` 벤더 스펙 · `[I]` 추론/분석 (리뷰어 자신의 것, 측정도 출판도 아님)
+
+*(원문 영어 · 국문 번역본. 인용문은 원문을 병기했습니다.)*
 
 ---
 
-## 0. Why this revision exists
+## 0. 이 개정판이 존재하는 이유
 
-The prior review was written against a looser description of the system. The confirmed diagram changes two things that invalidate parts of it:
+이전 리뷰는 시스템에 대한 느슨한 서술을 근거로 작성됐습니다. 확정된 다이어그램이 두 가지를 바꾸고, 그것이 이전 리뷰의 일부를 무효화합니다:
 
-1. **Wrist F/T is an input to Model 2.** No function of `(target pose, joint angles)` produces a wrench. The prior review's most severe objection — "the low level is a bijective kinematic map, therefore it can only be learning inverse kinematics" — was formed without this fact and is **false as stated**.
-2. **Both models consume the *same* head camera frame.** "Two vision encoders" was never a real cost, and the latency figures that drove the prior review's second conclusion turn out to be a *device-placement* artifact, not an architectural property `[M]`.
+1. **손목 F/T가 Model 2의 입력입니다.** `(목표 포즈, 관절각)`의 어떤 함수도 wrench를 만들어내지 못합니다. 이전 리뷰의 가장 강한 반론 — "저수준은 전단사 kinematic map이므로 IK를 학습하는 것밖에 될 수 없다" — 은 이 사실을 모르고 형성됐고, **명시된 그대로는 거짓입니다.**
+2. **두 모델이 *같은* 헤드 카메라 프레임을 소비합니다.** "비전 인코더 2개"는 애초에 실질 비용이 아니었고, 이전 리뷰의 두 번째 결론을 이끌었던 latency 수치는 아키텍처 속성이 아니라 *디바이스 placement* 아티팩트였음이 드러났습니다 `[M]`.
 
-A third fact emerged only because the diagram is precise: the arms are **7-DoF × 2 = 14, all arm, no gripper anywhere**. The prior review did not catch this, and it outranks everything the prior review did say.
+세 번째 사실은 다이어그램이 정밀했기 때문에 비로소 드러났습니다: 팔이 **7-DoF × 2 = 14, 전부 팔이고 그리퍼는 어디에도 없습니다.** 이전 리뷰는 이것을 잡아내지 못했고, 이것이 이전 리뷰가 말한 모든 것보다 중요합니다.
 
 ---
 
-## 1. What changed and what did not
+## 1. 바뀐 것과 바뀌지 않은 것
 
-| # | Prior claim | Verdict | Reason | Evidence |
+| # | 이전 주장 | 판정 | 이유 | 근거 |
 |---|---|---|---|---|
-| 1a | "Model 2 is inverse kinematics; the input set is degenerate" | **OVERTURNED** | Identical `(pose, q)` can be free space, light contact, or jammed contact. The wrench is the only input in the entire system carrying contact state, object stiffness/weight/CoM, or slip. Input-set degeneracy is retired. | Confirmed diagram + kinematic argument `[I]`; FILIC: "position-only observations miss key task-state information" `[PP]` |
-| 1b | "…therefore delete Model 2 / demote it to a residual" | **UPHELD, premise replaced** | The *optimization* degeneracy survives even though the information degeneracy does not. Next-joint-angle MSE is ~99 % explained by `IK(target)`; force control is active in **84 % of in-contact steps but only 2.9 % of free-space steps**, so the wrench is a sparse residual the optimizer will marginalize. Correct justification is now "make the analytic term explicit so the wrench becomes the residual's dominant explanatory input **by construction**," not "it's IK." | FIRST 84 %/2.9 % `[PP]`; ForceVLA naive concat **+2.9 pp** (37.3→40.2) vs **+23.2 pp** structured `[PR]`; FoAR naive force-concat **worse** than vision-only on wiping (0.500→0.475) `[PR]` |
-| 1c | "…as a **clipped** residual" | **OVERTURNED** | The entire value of the wrench is corrections during contact that are *large* relative to free-space corrections. A clip bound tuned on free-space residuals suppresses exactly the signal the sensor was added to capture. Use contact-phase gating or contact-conditioned bounds. | `[I]`, consistent with FoAR's contact-gated routing `[PR]` |
-| 1d | "learned **worse** than analytic IK" | **UNSUPPORTED — withdraw** | No published work compares learned `(pose, joints, wrench) → joints` against IK + admittance on the same hardware. Evidence for force-as-input points the other way. | FACTR 21.3 % → 61.2 % → 87.5 % on unseen objects `[PP]`; sensorless-bilateral ACT nut-turning 0/5 → 5/5 with force as input only `[PP]`; Bi-ACT eye cream 50 % → 100 % `[PP]` |
-| 2a | "Remove RGB from Model 2 — it doubles the most expensive component" | **OVERTURNED** | Same frame, same timestamp; one encoder serves both. Measured saving from sharing is only **14.6 ms/cycle = 6.0 %** of an MPS cycle (9.5 % CPU). The two-encoder cost was never the problem. | `[M]` |
-| 2b | "…and caps the fast loop at 4.7 Hz" | **OVERTURNED** | 214/289 ms p50/p99 is **MPS-specific**. Model 2 **with its own ViT-S/16@224** on CPU: **59.5 Hz p50 / 50.4 Hz p99 / 28 Hz worst**, while Model 1 (263.8 M) concurrently holds 4.2 Hz on GPU. Both-on-MPS collapses to 15.5/11.5 Hz — mutual destruction. A **placement bug was diagnosed as an architecture bug**. | `[M]` |
-| 2c | "…therefore delete the image" | **OVERTURNED (conclusion, not just reasons)** | Two independent reasons the image is load-bearing in Model 2: (i) it must resolve one redundant DoF per arm — a posture/obstacle question proprioception cannot answer; (ii) wrist F/T is **structurally blind to elbow/forearm collision**, and the elbow sweeps a **0.467 × 0.438 × 0.240 m** box at *fixed* end-effector pose. | `[M]` (elbow box, own numerical experiment); `[I]` |
-| 3a | "Absolute 6-DoF pose is the worst-measured action abstraction (8 % vs 94 %)" | **OVERTURNED / MISCITED** | Mazzaglia et al. RA-L 2024 Table I classifies by **final** action. Model 2 outputs 14 joints → it sits in the **96 % oracle column, not the 8 % column**. Those 5 tasks were selected to require full-configuration control (one presses a button *with the elbow*); the baseline was MoveIt + pick_ik at defaults with no posture task; on the same paper's standard 8-task suite the redundancy-aware space is "completely in line with task space." On 6-DoF bimanual hardware, 13 000+ real rollouts: EEF-delta 89.6 % vs joint-delta 88.0 % — a **1.6-point, noise-level gap**. Quoting 8 % here gets the review dismissed. | `[PR]` arXiv:2406.04144 Table I; `[PP]` arXiv:2602.23408 |
-| 3b | "Switch to chunk-wise deltas" | **UPHELD and STRENGTHENED** | ACT: **1 % at k=1 vs 44 % at k=100** — and that was at 50 Hz. EEF absolute 69.0 % → EEF delta 89.6 % (+20.6 pp). Chunk-wise beats step-wise by up to 10 pp, O(1) vs O(k) error amplification. Here the loop is 2–5 Hz, so the per-step interface is *far* worse than the published ablation implies. | `[PR]` ACT Fig. 8(a); `[PP]` arXiv:2602.23408 |
-| 4 | "Head-relative frame is banned as the interface frame" | **OVERTURNED as stated; replaced by a conditional + an analytic fix** | Camera-frame action grounding **beats** base frame: +13.8 pp sim discrete, +8.0 pp sim continuous, **+10.0 pp real (58.0 → 68.0)** — *conditional on a static camera with known extrinsics*, which OC-VLA never varies. Also, `B_T_H = FK(q)·(H_T_hand)⁻¹` from the robot's own visible hands makes the transform **weakly observable, not absent**. | `[PR]` arXiv:2508.13103 Table II |
-| 5 | "Splitting capacity across two models has no supporting evidence" | **OVERTURNED** | *Rate:* heterogeneous placement gives 4.2–4.5 Hz (GPU) + 59.5 Hz p50 (CPU) **concurrently**; no single model does both on this hardware `[M]`. Dual-rate is the norm (Helix S2 7–9 Hz / S1 200 Hz `[V]`; FILIC 25 Hz over a 2 kHz inner loop `[PP]`). *Data reuse:* Model 1's `(image, pose) → pose` trains from human egocentric video with no robot joints (EgoVLA, ~500 k pairs `[PP]`); Model 2 needs joints + wrench, which only robot teleop provides. That asymmetry **is** the reuse justification. | `[M]`, `[PP]`, `[V]` |
-| 6a | "The two-model design is **dominated** by single-model + classical spine" | **OVERTURNED** | Domination requires being at least as good on every axis. It isn't: one model on this hardware is either 4 Hz *or* small, and a classical spine cannot exploit implicit object-property inference (ALPHA-α: liquid-filled/irregular objects 50 %→100 %, 50 %→80 %). | `[M]`, `[PP]` |
-| 6b | "Build the classical-spine variant first" | **UPHELD, with the baseline raised** | Prior review understated its own comparator. The honest baseline is **IK + sensorless admittance from motor current**, not bare position control: egg-on-bread 40 % → 80 % with no F/T sensor and no learning; 0.69 N force estimation from servo signals. | `[PP]` arXiv:2603.00913 |
-| **N1** | *(not raised)* **No gripper command exists anywhere** | **NEWLY RAISED — blocking** | See §3. | `[PR]` |
-| **N2** | *(not raised)* **The F/T sensor has no actuation path** | **NEWLY RAISED** | Model 2 emits bare joint positions — no stiffness, no reference wrench, no selection mask. | `[PR]`/`[PP]` |
-| **N3** | *(not raised)* **No timing/duration field** | **NEWLY RAISED** | Approach velocity becomes Δpose ÷ inference jitter; approach velocity is linearly proportional to impact force. | `[PR]` arXiv:2106.10969 |
-| **N4** | *(not raised)* **No inter-hand relative pose** | **NEWLY RAISED** | 70 % vs 30 % measured, and not recoverable by subtraction. | `[PR]` UMI |
-| **N5** | *(not raised)* **6-DoF interface for 7-DoF arms is underdetermined** | **NEWLY RAISED** | See §3(a). | `[M]` + `[PR]` |
-| **N6** | *(not raised)* **Model 1's own labels are frame-corrupted** | **NEWLY RAISED** | head-frame-at-t+k ≠ head-frame-at-t. EgoVLA reprojects using world-frame camera poses precisely for this. | `[PP]` |
-| **N7** | *(not raised)* **Teleop rig is a precondition** | **NEWLY RAISED** | If unilateral, the wrench channel carries no learnable structure. Check before any modeling work. | `[PP]` |
+| 1a | "Model 2는 IK다 — 입력 집합이 퇴화적" | **뒤집힘(OVERTURNED)** | 동일한 `(포즈, q)`가 자유공간·가벼운 접촉·끼인 접촉 전부일 수 있습니다. wrench는 시스템 전체에서 접촉 상태, 물체 강성/무게/CoM, 미끄러짐을 나르는 유일한 입력입니다. 입력 집합 퇴화 논거는 폐기 | 확정 다이어그램 + 기구학 논증 `[I]`; FILIC: "position-only observations miss key task-state information" `[PP]` |
+| 1b | "…그러므로 Model 2 삭제 / residual로 강등" | **유지 — 단 전제 교체** | 정보 퇴화는 사라졌지만 *최적화* 퇴화는 살아 있습니다. 다음 관절각 MSE의 ~99%는 `IK(target)`로 설명되고, 힘 제어는 **접촉 스텝의 84%에서 활성이지만 자유공간 스텝의 2.9%에서만** 활성이라, wrench는 옵티마이저가 주변화(marginalize)할 희소한 residual입니다. 올바른 정당화는 이제 "해석적 항을 명시해서 wrench가 residual의 지배적 설명 입력이 **구조적으로** 되게 하라"이지 "그건 IK다"가 아닙니다 | FIRST 84%/2.9% `[PP]`; ForceVLA 단순 concat **+2.9pp**(37.3→40.2) vs 구조적 융합 **+23.2pp** `[PR]`; FoAR 단순 force-concat이 닦기에서 vision-only보다 **오히려 나쁨**(0.500→0.475) `[PR]` |
+| 1c | "…**clipped** residual로" | **뒤집힘** | wrench의 가치 전체는 자유공간 보정 대비 *큰* 접촉 중 보정입니다. 자유공간 residual에 맞춰 튜닝한 clip 한계는 센서를 단 이유인 바로 그 신호를 억압합니다. contact-phase gating 또는 접촉 조건부 bound를 쓰십시오 | `[I]`, FoAR의 contact-gated routing과 일치 `[PR]` |
+| 1d | "해석적 IK보다 **더 나쁘게** 학습된다" | **근거 없음 — 철회** | 학습된 `(포즈, 관절, wrench) → 관절`을 같은 하드웨어에서 IK + admittance와 비교한 출판 연구가 없습니다. force-as-input 근거는 반대 방향을 가리킵니다 | FACTR: 미지 물체에서 21.3% → 61.2% → 87.5% `[PP]`; sensorless-bilateral ACT 너트 돌리기 0/5 → 5/5 (force를 입력으로만) `[PP]`; Bi-ACT 아이크림 50% → 100% `[PP]` |
+| 2a | "Model 2에서 RGB를 빼라 — 가장 비싼 컴포넌트를 두 번 계산한다" | **뒤집힘** | 같은 프레임, 같은 타임스탬프 — 인코더 1개가 둘 다 서비스합니다. 공유의 실측 절감은 MPS 사이클의 **14.6ms/사이클 = 6.0%**(CPU 9.5%)뿐. 인코더 2개 비용은 애초에 문제가 아니었습니다 | `[M]` |
+| 2b | "…그리고 빠른 루프가 4.7Hz로 캡된다" | **뒤집힘** | 214/289ms p50/p99는 **MPS 고유 현상**입니다. Model 2가 **자체 ViT-S/16@224를 갖고** CPU에서: **59.5Hz p50 / 50.4Hz p99 / 최악 28Hz**, 그동안 Model 1(263.8M)이 GPU에서 4.2Hz를 동시 유지. 둘 다 MPS에 올리면 15.5/11.5Hz로 붕괴 — 상호 파괴. **placement 버그를 아키텍처 버그로 오진한 것** | `[M]` |
+| 2c | "…그러므로 이미지를 삭제하라" | **뒤집힘 (이유만이 아니라 결론 자체)** | Model 2에서 이미지가 필수적인 독립적 이유 둘: (i) 팔당 1개의 중복 DoF를 해소해야 하는데 — 이는 proprioception이 답할 수 없는 자세/장애물 질문입니다. (ii) 손목 F/T는 **팔꿈치/전완 충돌에 구조적으로 눈이 멀고**, 팔꿈치는 엔드이펙터 포즈를 *고정*한 채로도 **0.467 × 0.438 × 0.240 m** 박스를 훑습니다 | `[M]` (팔꿈치 박스, 자체 수치 실험); `[I]` |
+| 3a | "절대 6-DoF 포즈는 실측상 최악의 행동 추상화 (8% vs 94%)" | **뒤집힘 / 오인용(MISCITED)** | Mazzaglia et al. RA-L 2024 Table I은 **최종** 행동 기준으로 분류합니다. Model 2는 관절 14개를 출력하므로 **8% 열이 아니라 96% oracle 열**에 속합니다. 그 5개 작업은 전신 형상 제어가 필요하도록 선별됐고(하나는 *팔꿈치로* 버튼을 누름), baseline은 자세 태스크 없는 기본 설정 MoveIt + pick_ik였으며, 같은 논문의 표준 8작업 스위트에서는 redundancy-aware 공간이 작업공간과 "completely in line"입니다. 6-DoF 양팔 하드웨어의 13,000+ 실기체 rollout: EEF-delta 89.6% vs joint-delta 88.0% — **1.6포인트, 노이즈 수준 격차.** 여기서 8%를 인용하면 리뷰 자체가 기각됩니다 | `[PR]` arXiv:2406.04144 Table I; `[PP]` arXiv:2602.23408 |
+| 3b | "chunk 단위 delta로 바꿔라" | **유지, 오히려 강화** | ACT: **k=1에서 1% vs k=100에서 44%** — 그것도 50Hz 플랫폼에서였습니다. EEF 절대 69.0% → EEF delta 89.6%(+20.6pp). chunk 단위가 스텝 단위보다 최대 10pp 우위, 오차 증폭 O(1) vs O(k). 여기 루프는 2–5Hz라 스텝 단위 인터페이스는 출판된 ablation이 시사하는 것보다 *훨씬* 나쁩니다 | `[PR]` ACT Fig. 8(a); `[PP]` arXiv:2602.23408 |
+| 4 | "헤드 상대 프레임은 인터페이스 프레임으로 금지" | **명시된 그대로는 뒤집힘 — 조건부 + 해석적 수정으로 대체** | 카메라 프레임 action grounding이 base 프레임을 **이깁니다**: 시뮬 discrete +13.8pp, 시뮬 continuous +8.0pp, **실기체 +10.0pp (58.0 → 68.0)** — *단, 정적 카메라 + 알려진 extrinsics 조건부*이고, OC-VLA는 이 조건을 한 번도 변화시키지 않습니다. 또한 로봇 자신의 보이는 손으로부터 `B_T_H = FK(q)·(H_T_hand)⁻¹`를 얻을 수 있어 변환은 **부재가 아니라 약하게 관측 가능(weakly observable)** 합니다 | `[PR]` arXiv:2508.13103 Table II |
+| 5 | "용량을 두 모델로 나누는 것에는 지지 근거가 없다" | **뒤집힘** | *Rate:* 이종(heterogeneous) placement가 4.2–4.5Hz(GPU) + 59.5Hz p50(CPU)을 **동시에** 줍니다 — 이 하드웨어에서 단일 모델은 둘 다 못 합니다 `[M]`. 이중 rate가 표준입니다(Helix S2 7–9Hz / S1 200Hz `[V]`; FILIC 25Hz + 2kHz 내부 루프 `[PP]`). *데이터 재사용:* Model 1의 `(이미지, 포즈) → 포즈`는 로봇 관절 없는 인간 egocentric 비디오로 학습됩니다(EgoVLA, ~50만 쌍 `[PP]`). Model 2는 관절 + wrench가 필요하고 이는 로봇 텔레옵만이 제공합니다. **그 비대칭이 곧 재사용 정당화입니다** | `[M]`, `[PP]`, `[V]` |
+| 6a | "2모델 설계는 단일 모델 + 고전 척추에 **지배당한다(dominated)**" | **뒤집힘** | 지배(domination)는 모든 축에서 최소한 동등해야 성립합니다. 그렇지 않습니다: 이 하드웨어에서 단일 모델은 4Hz*이거나* 작거나 둘 중 하나이고, 고전 척추는 암묵적 물체 속성 추론을 활용할 수 없습니다(ALPHA-α: 액체 채운/불규칙 물체 50%→100%, 50%→80%) | `[M]`, `[PP]` |
+| 6b | "고전 척추 변형을 먼저 만들어라" | **유지 — 단 baseline 상향** | 이전 리뷰는 자신의 비교 대상을 과소평가했습니다. 정직한 baseline은 맨 위치 제어가 아니라 **IK + 모터 전류 기반 sensorless admittance**입니다: 계란-빵 작업 40% → 80%, F/T 센서 없이, 학습 없이. 서보 신호로 0.69N 힘 추정 | `[PP]` arXiv:2603.00913 |
+| **N1** | *(제기 안 됨)* **그리퍼 명령이 어디에도 없음** | **신규 제기 — blocking** | §3 참조 | `[PR]` |
+| **N2** | *(제기 안 됨)* **F/T 센서에 구동 경로가 없음** | **신규 제기** | Model 2는 맨 관절 위치만 출력 — 강성도, reference wrench도, selection mask도 없음 | `[PR]`/`[PP]` |
+| **N3** | *(제기 안 됨)* **타이밍/duration 필드 없음** | **신규 제기** | 접근 속도 = Δ포즈 ÷ 추론 jitter가 되고, 접근 속도는 충격력에 선형 비례 | `[PR]` arXiv:2106.10969 |
+| **N4** | *(제기 안 됨)* **손간 상대 포즈 없음** | **신규 제기** | 실측 70% vs 30%, 그리고 뺄셈으로 복구 불가 | `[PR]` UMI |
+| **N5** | *(제기 안 됨)* **7-DoF 팔에 6-DoF 인터페이스는 underdetermined** | **신규 제기** | §3(a) 참조 | `[M]` + `[PR]` |
+| **N6** | *(제기 안 됨)* **Model 1의 라벨 자체가 프레임 오염됨** | **신규 제기** | head-frame-at-t+k ≠ head-frame-at-t. EgoVLA가 정확히 이 이유로 world 프레임 카메라 포즈로 재투영 | `[PP]` |
+| **N7** | *(제기 안 됨)* **텔레옵 리그가 전제조건** | **신규 제기** | unilateral이면 wrench 채널에 학습 가능한 구조가 없음. 모델링 작업 전에 확인할 것 | `[PP]` |
 
 ---
 
-## 2. Revised verdict on the low-level model
+## 2. 저수준 모델에 대한 개정 판정
 
-**Yes — a learned low-level model is now genuinely justified. It was not, on the prior review's information.** But it is justified for a narrower job than the diagram implies, and only under stated conditions.
+**예 — 학습된 저수준 모델은 이제 진짜로 정당화됩니다. 이전 리뷰의 정보로는 아니었습니다.** 다만 다이어그램이 시사하는 것보다 좁은 역할에 대해, 그리고 명시된 조건 하에서만 정당화됩니다.
 
-**What the wrench buys, decomposed into three parts:**
+**wrench가 사주는 것을 셋으로 분해하면:**
 
-| Part | Learned or classical? |
+| 부분 | 학습이 이기는가 고전이 이기는가 |
 |---|---|
-| (1) Contact-state estimation / phase detection | **Learned wins.** Classical needs a hand-written state machine. This is where FACTR's gains live. |
-| (2) Continuous force regulation along constrained directions | **Classical wins, decisively.** Admittance does this at 1 kHz with stability guarantees. A 3–5 Hz — or even 50 Hz — learned loop cannot. |
-| (3) Implicit object-property inference (stiffness, weight/CoM, slip) from wrench history | **Learned wins.** Invisible to vision and kinematics; fixed-gain admittance would apply the same law to every object. ALPHA-α's 50 %→100 % gains are exactly this `[PP]`. |
+| (1) 접촉 상태 추정 / phase 감지 | **학습 승.** 고전 방식은 손으로 쓴 state machine이 필요합니다. FACTR의 이득이 사는 곳이 여기입니다 |
+| (2) 구속 방향을 따라가는 연속 힘 조절(regulation) | **고전 압승.** admittance는 이것을 1kHz에서 안정성 보장과 함께 합니다. 3–5Hz — 심지어 50Hz — 학습 루프는 못 합니다 |
+| (3) wrench 이력으로부터의 암묵적 물체 속성 추론 (강성, 무게/CoM, 미끄러짐) | **학습 승.** 비전과 기구학에는 보이지 않습니다. 고정 게인 admittance는 모든 물체에 같은 법칙을 적용합니다. ALPHA-α의 50%→100% 이득이 정확히 이것입니다 `[PP]` |
 
-The learned low level is justified **only to the extent it is capturing (1) and (3)**. Any part of it that is doing (2) is re-implementing a solved problem worse.
+학습된 저수준은 **(1)과 (3)을 포착하는 만큼만** 정당화됩니다. (2)를 하고 있는 부분은 이미 풀린 문제를 더 나쁘게 재구현하는 것입니다.
 
-**Conditions under which the verdict holds:**
+**판정이 성립하는 조건:**
 
-- **Arm command interface — currently unstated and decisive.** If the arms accept **torque or Cartesian impedance** commands, the right design is FILIC-shaped (policy emits pose/stiffness at 25–50 Hz over a 1–2 kHz impedance inner loop) and a joint-position predictor is the wrong abstraction entirely. If the arms accept **joint positions only**, the FACTR / FACTR-2 / FoAR evidence applies, the design is viable — but it delivers force-aware **switching**, not force **regulation**. FACTR's own analysis is explicit: the policy "recognizes contact events and switches strategies, rather than continuously regulating applied force magnitude" `[PP]`. **Answer this before writing code.**
-- **Task class.** Justified for contact-rich tasks with unknown/varying object properties (insertion, wiping, placing deformables, lifting objects of unknown weight distribution). **Not** justified for free-space reach-and-place, where analytic IK + a posture task is strictly better and 40 000× cheaper (DLS 6×7 = 5.31 µs `[M]`).
-- **Teleop rig.** If the operator did not feel contact, stop. The wrench channel will carry open-loop, demo-inconsistent human forces. ALPHA-α achieved bilateral feedback at $8 951 vs ALOHA's $20 485 `[PP]`, so this is not a cost tradeoff.
+- **팔 명령 인터페이스 — 현재 미명시이고 결정적입니다.** 팔이 **토크 또는 Cartesian impedance** 명령을 받는다면 올바른 설계는 FILIC 형태이고(정책이 25–50Hz로 pose/stiffness를 내고 1–2kHz impedance 내부 루프가 실행), 관절 위치 예측기는 완전히 잘못된 추상화입니다. 팔이 **관절 위치만** 받는다면 FACTR / FACTR-2 / FoAR 근거가 적용되고 설계는 성립하지만 — 그것이 주는 것은 힘 인지 **switching**이지 힘 **regulation**이 아닙니다. FACTR 자신의 분석이 명시적입니다: 정책은 "recognizes contact events and switches strategies, rather than continuously regulating applied force magnitude"(접촉 이벤트를 인식하고 전략을 전환할 뿐, 가해지는 힘 크기를 연속적으로 조절하지 않는다) `[PP]`. **코드를 쓰기 전에 이것부터 답하십시오.** *(참고: 이후 REV.2에서 위치 전용으로 확정됨)*
+- **작업 종류.** 물체 속성이 미지/가변인 접촉 집약 작업(삽입, 닦기, 변형체 놓기, 무게 분포 미지 물체 들기)에 대해 정당화됩니다. 자유공간 reach-and-place에는 정당화되지 **않습니다** — 거기서는 해석적 IK + 자세 태스크가 엄격히 더 좋고 40,000배 쌉니다(DLS 6×7 = 5.31µs `[M]`).
+- **텔레옵 리그.** 조작자가 접촉을 못 느꼈다면 멈추십시오. wrench 채널이 개루프의, 데모마다 일관성 없는 인간 힘을 나르게 됩니다. ALPHA-α는 bilateral 피드백을 $8,951에 달성했습니다(ALOHA $20,485 대비) `[PP]` — 비용 트레이드오프가 아닙니다.
 
-**How it must be structured:**
+**구조는 이렇게 되어야 합니다:**
 
 ```
-q_cmd[t..t+H] = IK_DLS(target_pose_base[t..t+H], q_now)      # analytic, 5.31 µs, exact
-               + Δθ(q_now, wrench, target, vision_tokens)     # learned residual, contact-gated
-stiffness/mode[t..t+H]                                        # learned or scheduled, per arm
-aperture[t..t+H]                                              # learned, continuous
+q_cmd[t..t+H] = IK_DLS(target_pose_base[t..t+H], q_now)      # 해석적, 5.31µs, 정확
+               + Δθ(q_now, wrench, target, vision_tokens)     # 학습된 residual, contact-gated
+stiffness/mode[t..t+H]                                        # 학습 또는 스케줄, 팔별
+aperture[t..t+H]                                              # 학습, continuous
 ```
 
-Four non-negotiables:
+**타협 불가 4가지:**
 
-1. **Analytic IK term is explicit.** Removes the ~99 % of the loss that is kinematics, leaving the wrench as the residual's dominant explanatory input by construction rather than by hope.
-2. **Contact gating on the force path** — a contact-phase predictor (FoAR), a per-axis selection mask (Force Policy), or FIRST-style pre-contact/contact upsampling (0.818 vs 0.670 for pre-contact vs contact-only upsampling) `[PP]`. Flat concatenation, which is what the diagram draws, is the configuration measured to yield +2.9 pp instead of +23.2 pp `[PR]`.
-3. **Chunked output**, not single-step. See §3(d).
-4. **An actuation path for the sensed force** — at minimum a 2-level stiffness/mode per arm, plus gripper aperture. Without it the sensor is BOM cost with no output channel.
+1. **해석적 IK 항을 명시하십시오.** 손실의 ~99%인 기구학을 제거해서, wrench가 residual의 지배적 설명 입력이 되는 것을 희망이 아니라 **구조로** 만듭니다.
+2. **힘 경로에 contact gating** — contact-phase 예측기(FoAR), 축별 selection mask(Force Policy), 또는 FIRST식 pre-contact/contact upsampling(pre-contact upsampling 0.818 vs contact-only 0.670) `[PP]`. 다이어그램이 그리는 **평면 concat은 +23.2pp 대신 +2.9pp가 나오는 것으로 측정된 바로 그 구성**입니다 `[PR]`.
+3. **chunk 출력.** 스텝 단위 금지. §3(d) 참조.
+4. **감지된 힘의 구동 경로** — 최소한 팔별 2단계 stiffness/mode + 그리퍼 aperture. 없으면 센서는 출력 채널 없는 BOM 비용입니다.
 
-**Keep the image in Model 2.** The prior review's deletion argument is dead on both stated grounds (`[M]`), and the image is needed for redundancy resolution and for elbow-collision awareness that F/T structurally cannot provide.
-
----
-
-## 3. Newly-raised defects the diagram exposes, ranked by severity
-
-### #1 — No gripper command exists anywhere (structural impossibility, not a degradation)
-
-Model 1 outputs 6-DoF pose (no spare dimension). Model 2 outputs 14 arm joints. The developer's 7×2 is **all arm**. ACT's superficially identical 14 is **12 arm + 2 gripper** on 6-DoF ViperX arms — verbatim: "joint positions for two robot arms (7+7=14 DoF)" on "ViperX 6-DoF robot arms" `[PR]`. The numerical coincidence is almost certainly why this went unnoticed. Every next-best-pose architecture in this family keeps gripper first-class: HDP `a_high = (a_pose, a_grip)`, PerAct, RVT `[PR]`.
-
-**Failure scenario:** the policy is trained, converges, produces beautiful arm trajectories, and grasping success is **0 %** — not degraded, zero — because no signal in the system can close a hand. No amount of model quality, data, or tuning recovers it.
-
-Two sub-defects that survive even after adding an aperture output:
-- **Binary aperture is insufficient.** UMI: "binary gripper actions will be unlikely to meet the precision requirement," and continuous width is *also* the implicit grasp-force channel via series-elastic finger deformation `[PR]`.
-- **Gripper *state* must be an input.** A binary commanded state cannot distinguish "grasp close" (object held) from "empty close" (missed). The policy then "incorrectly transitions to post-grasp actions like pull despite lacking a secure grasp" — silently executing the entire remaining trajectory holding nothing. With real feedback: 10–30 % → 100 % under disturbance `[PP]`.
-- Timing skew between gripper and arm alone cost UMI **87.5 % → 57.5 %** `[PR]`.
-
-**Open hardware question that changes the fix size by an order of magnitude:** if "양손" means multi-finger hands rather than parallel jaws, the missing field is **24–44 dims** plus a pre-shaping decision that cannot be deferred to a contact heuristic — not 2 scalars.
-
-### #2 — The wrist F/T sensor has no actuation path (the new input is dead)
-
-Model 2's only output is joint positions. It can sense a wrench but can respond only through the servo's fixed, isotropic, uncommandable Kp. Every system in the literature that achieved genuine regulation added an impedance inner loop (FILIC, 2 kHz), a reference wrench + per-axis mask (Force Policy), a hybrid controller (Tactile-VLA), or a hand-coded reactive rule (FoAR, ε = 0.006 m) `[PP]`.
-
-**Failure scenario:** the sensor is bought (~$3.9 k for 2× FT300-S `[V]`), wired, payload-inertia-identified, and the ablation in §5 shows zeroing the wrench changes nothing — because there was never an output channel through which it could matter.
-
-### #3 — The interface is single-step, and there is no duration field (same defect, same fix)
-
-**Chunking:** ACT measured **1 % at k=1 vs 44 % at k=100** `[PR]`. That was on a 50 Hz platform where a missed step costs 20 ms of blind time. Here the full two-stage cycle is ~430 ms p50 / 578 ms p99 under contention if both models sit on MPS — a **1.7–2.3 Hz** loop, ~21× the blind interval `[M]`. Even in the correct CPU/GPU placement, Model 1 is 4.2–4.5 Hz.
-
-**Duration:** a waypoint with no `dt` is not a trajectory. The low level's only available velocity is Δpose ÷ inference inter-arrival interval — i.e. **commanded approach velocity becomes a function of GPU scheduling**. Approach velocity is measured to be linearly proportional to impact force over 0.02–0.16 m/s `[PR]`. Applying the measured jitter: a 10 mm step in 214 ms = 47 mm/s; the same step in 289 ms = 35 mm/s → **~35 % run-to-run contact-force variation on an identical commanded pose** `[I from M]`.
-
-**Compliance cannot rescue this.** Measured: reducing stiffness affects post-impact jerk but has "no significant effect on impact forces, because the robot has to make the contact for the error and stiffness term in the feedback control loop to come into effect" `[PR]`. Duration and stiffness are orthogonal fields solving different problems.
-
-**Failure scenario:** insertion succeeds in the lab and intermittently crushes or bounces off the target in the field, with no change to the commanded pose — the difference is which other process was on the GPU.
-
-### #4 — Model 2 lacks head joint state while consuming a head-frame target and emitting base-frame joints
-
-The prior review's "the transform is missing, therefore unidentifiable" is **too strong**: Model 2 has 14 joints and the head image, the robot's own hands are usually in frame, and `B_T_H = FK_B(q)·(H_T_hand_observed)⁻¹` is markerless eye-hand self-calibration. The transform is **weakly observable**.
-
-The real defect is worse than absence because it is silent. The channel (i) fails exactly when the head moves — hands occluded by the grasped object, or out of a 224×224 FOV; (ii) is worst-conditioned along the optical axis, i.e. the depth direction grasping depends on; (iii) is never requested by any loss term; (iv) loses to the cheaper shortcut of memorizing a constant `B_T_H` from static background cues — a documented failure that "collapses when workspace geometry or camera placement shifts" `[PR]`.
-
-**Quantified:** at the measured 214/289 ms, a modest **30 °/s** head pan injects **56–76 mm** of lateral error at 0.5 m reach (60 °/s → 112–151 mm); DLR needed **3.1 mm** absolute accuracy for reliable manipulation `[M]` + `[PR]`. Static neck calibration adds 8.7 mm per degree at 0.5 m; DLR's uncalibrated whole-chain figure was **21 mm** `[PR]`.
-
-**Also corrupts Model 1's labels, not just Model 2's inputs.** Model 1 predicts a *future* pose in "the head frame," but head-frame-at-t+k ≠ head-frame-at-t. EgoVLA hits precisely this and fixes it by reprojecting future wrist poses using world-frame camera poses `[PP]`.
-
-**Secondary interaction with the new F/T input:** the head frame is not gravity-aligned and tilts with neck pitch, so a head-frame target and a gravity-loaded wrench are in mutually inconsistent frames with a dependence on the unobserved head state `[I]`.
-
-**Failure scenario:** clean training curves, clean in-distribution validation, then progressive drift in the field after a camera bump, a workspace re-layout, or a deployment where operators move their heads more than the training operators did. Worst failure class available: silent.
-
-### #5 — 7-DoF × 2 makes the 6-DoF pose interface provably underdetermined
-
-A 6-DoF pose does not determine a 7-DoF configuration. Measured on a Franka Panda model with the end-effector pose held to 1e-12 m: **joint 1 sweeps 316°, joint 5 sweeps 278°, and the elbow traverses a 0.467 × 0.438 × 0.240 m box on a circle of radius 0.239 m** `[M]`. Half a metre of elbow travel at zero end-effector motion *is* the redundancy problem, stated geometrically.
-
-Two consequences:
-
-- **Model 1 cannot see or command its own elbow.** Two physically distinct 14-DoF states are the same state to the cerebrum; its pose-only state is **not Markov** for the plant; it cannot detect that its own plan drives an elbow into a shelf. All posture selection is silently delegated to Model 2, which must re-infer it from a head image that in a cabinet task frequently does not contain the elbow-relevant obstacle.
-- **L2 regression over the self-motion manifold produces off-manifold configurations.** Measured joint-space averaging of two valid IK solutions differing by Δψ: **10° → 1.9 mm, 30° → 17.6 mm, 45° → 38.5 mm, 60° → 50.3 mm, 90° → 96.2 mm** end-effector error `[M]`. Model 2 is conditioned on current `q`, which pins the branch by continuity, so the operative quantity is the **residual ψ spread in your demo data**, not the full 310° manifold.
-
-**The fix is cheap and provably no-cost:** add **one scalar per arm** — the base joint j₁ (ERJ) — to Model 1's input and output. 12 → 14 numbers. Auto-labelled from recorded joints by FK at **~34 µs/sample, ~35 s per 1 M steps** `[M]`, zero human effort. Ablation: odd (twisting) joints work, even (bending) joints cause performance collapse, base joint best "by a large margin" `[PR]`. On non-confined tasks the redundancy-aware space is "completely in line with task space" — **strictly dominant**.
-
-Use ERJ (j₁), not the geometric arm angle: ERA had a higher invalid-action rate and needed a DLS solver to control it. If you do use the arm angle, use the **stereographic SEW** definition — algorithmic singularity is unavoidable (Hairy Ball Theorem), but the conventional fixed-reference form is singular on a *full line through the workspace* and will silently produce discontinuous labels there `[PR]`.
-
-**Also note:** wrist F/T is structurally blind to elbow/forearm contact — a wrist sensor measures only wrenches transmitted through the wrist. In confined 7-DoF operation the elbow is exactly what hits things, so neither the new sensor nor (if out of FOV) the head camera will catch it. The only remaining defence is a hard collision constraint inside the IK.
-
-### #6 — No inter-hand relative pose
-
-Measured **70 % (14/20) vs 30 % (6/20)** on UMI's bimanual cloth fold; described as "a critical ingredient to enable bimanual policy" `[PR]`. The failure mode is *timing* (asynchronous grasp) cured by a *spatial* field — relative pose is what lets the policy represent "both hands are in position now."
-
-**It cannot be recovered by subtracting the two absolute poses.** The decisive argument is the loss, not the arithmetic: an L2 loss over two absolute poses penalizes a harmless common-mode 5 mm error and an object-crushing differential 5 mm error **identically**. The network never receives gradient pressure to preserve the relative constraint `[I]`. (Secondarily: UMI *measured* relative pose in a registered shared frame to 10.1 mm / 0.8°, and the effect was largest when visual overlap was small — an information-availability finding.)
-
-### #7 — No timestamps, no head/torso joint state, no uncertainty
-
-Lowest immediate cost, but timestamps become **mandatory** the moment durations are added (a `dt` is meaningless without a clock both models agree on) and head/torso joint state is required to compute `B_T_H` at *capture* time. Note Helix moves the torso for reach `[V]` — if this platform's torso moves, head joints alone are insufficient; you need the full camera→arm-base chain.
+**Model 2의 이미지는 유지하십시오.** 이전 리뷰의 삭제 논거는 명시된 두 근거 모두에서 죽었고(`[M]`), 이미지는 중복성 해소와 — F/T가 구조적으로 제공할 수 없는 — 팔꿈치 충돌 인지에 필요합니다.
 
 ---
 
-## 4. Revised minimal interface spec
+## 3. 다이어그램이 드러낸 신규 결함, 심각도 순
 
-For 7-DoF × 2 with wrist F/T. `H` = chunk length; recommend **H = 8** (matches Diffusion Policy's measured optimum Ta=8; ACT's k=100 at 50 Hz scales to ≈4–8 at this platform's rate).
+### #1 — 그리퍼 명령이 어디에도 없음 (성능 저하가 아니라 구조적 불가능)
 
-### Model 1 — inputs
+Model 1 출력은 6-DoF 포즈(여유 차원 없음). Model 2 출력은 팔 관절 14개. 개발자의 7×2는 **전부 팔**입니다. ACT의 겉보기에 동일한 14는 6-DoF ViperX 팔에서 **팔 12 + 그리퍼 2**입니다 — 원문 그대로: "joint positions for two robot arms (7+7=14 DoF)" on "ViperX 6-DoF robot arms" `[PR]`. **숫자가 우연히 같은 것이 이것이 눈에 안 띈 이유가 거의 확실합니다.** 이 계열의 모든 next-best-pose 아키텍처는 그리퍼를 first-class로 유지합니다: HDP `a_high = (a_pose, a_grip)`, PerAct, RVT `[PR]`.
 
-| Field | Dim | Status | Why required |
-|---|---|---|---|
-| Head camera image | 224×224×3 | prior | unchanged |
-| Both-hands pose (head frame) | 2 × 7 | prior | unchanged. Keep head frame — OC-VLA's +10.0 pp real gain applies to pose-output models `[PR]` |
-| **Redundancy scalar (base joint j₁) per arm** | 2 × 1 | **NEW** | Without it the cerebrum's state is not Markov for a 14-DoF plant and it cannot detect its own infeasible plans (§3.5). Auto-labelled, ~34 µs/sample `[M]` |
-| **Gripper aperture, measured, per hand** | 2 × 1 | **NEW** | Cerebrum must know whether the hand is currently holding something to plan the next pose |
-| **Grasp-contact flag per hand** | 2 × 1 | **NEW** | Disambiguates "grasp close" from "empty close"; 10–30 % → 100 % under disturbance `[PP]` |
-| **Head (and torso) joint state** | n | **NEW** | Required to reproject labels and to compute `B_T_H` (§3.4) |
-| **Capture timestamp** | 1 | **NEW** | `B_T_H` must be evaluated at capture time, not inference time |
+**실패 시나리오:** 정책이 학습되고, 수렴하고, 아름다운 팔 궤적을 만드는데 파지 성공률이 **0%** — 저하가 아니라 0 — 입니다. 시스템의 어떤 신호도 손을 닫을 수 없기 때문입니다. 모델 품질, 데이터, 튜닝 어느 것도 이를 복구하지 못합니다.
 
-### Model 1 — outputs (per waypoint, × H)
+aperture 출력을 추가한 뒤에도 살아남는 하위 결함 둘:
+- **binary aperture로는 불충분합니다.** UMI: "binary gripper actions will be unlikely to meet the precision requirement." 그리고 continuous width는 series-elastic 손가락 변형을 통한 **암묵적 파지력 채널**이기도 합니다 `[PR]`.
+- **그리퍼 *상태*가 입력이어야 합니다.** binary 명령 상태만으로는 "파지 닫힘"(물체 잡힘)과 "빈손 닫힘"(놓침)을 구분할 수 없습니다. 그러면 정책이 "incorrectly transitions to post-grasp actions like pull despite lacking a secure grasp" — 아무것도 안 든 채로 나머지 궤적 전체를 조용히 실행합니다. 실제 피드백이 있으면 교란 하에서 10–30% → 100% `[PP]`.
+- 그리퍼-팔 타이밍 skew 하나만으로 UMI가 **87.5% → 57.5%** `[PR]`.
 
-| Field | Dim | Status | Why required |
-|---|---|---|---|
-| Both-hands pose (head frame) | 2 × 7 | prior, **now chunked** | 1 % → 44 % from k=1 → k=100 `[PR]`; worse here at 2–5 Hz |
-| **`dt` per waypoint** | 1 | **NEW** | Converts a waypoint list into a trajectory; without it approach velocity = Δpose ÷ GPU jitter → ~35 % contact-force variation `[I from M]` |
-| **Gripper aperture, continuous** | 2 × 1 | **NEW** | Nothing else in the system can command a hand. Continuous, not binary — it is also the implicit grasp-force channel `[PR]` |
-| **Redundancy scalar j₁ per arm** | 2 × 1 | **NEW** | The commandable half of §3.5 |
-| **Inter-hand relative pose, separately supervised** | 7 | **NEW** | 70 % vs 30 % `[PR]`; not derivable by subtraction under an L2 loss `[I]` |
-| Per-waypoint uncertainty (optional) | 2 × 1 | **NEW, optional** | Lets Model 2 decide when to defer to the analytic path |
+**수정 규모를 한 자릿수 바꾸는 미해결 하드웨어 질문:** "양손"이 평행 조가 아니라 다지 핸드를 의미한다면, 빠진 필드는 스칼라 2개가 아니라 **24–44차원** + 접촉 휴리스틱으로 미룰 수 없는 pre-shaping 결정입니다.
 
-**Sizing at H=8:** 8 × (14 pose + 2 aperture + 2 j₁ + 7 relative + 1 dt) ≈ **208 floats**. Against a 60.6 ms vision encoder this is < 0.1 ms `[M]` — there is no performance argument for the current minimal interface.
+### #2 — 손목 F/T 센서에 구동 경로가 없음 (새 입력이 죽어 있음)
 
-### Model 2 — inputs
+Model 2의 유일한 출력은 관절 위치입니다. wrench를 감지할 수는 있지만 서보의 고정되고 등방적이며 명령 불가능한 Kp를 통해서만 반응할 수 있습니다. 문헌에서 진짜 regulation을 달성한 모든 시스템은 무언가를 추가했습니다: impedance 내부 루프(FILIC, 2kHz), reference wrench + 축별 mask(Force Policy), hybrid 컨트롤러(Tactile-VLA), 또는 손으로 짠 반응 규칙(FoAR, ε = 0.006m) `[PP]`.
 
-| Field | Dim | Status | Why required |
-|---|---|---|---|
-| Head camera image (or **shared encoder tokens**) | 196 × d | prior, **kept** | Deletion refuted (§1, item 2c). Sharing costs 14.6 ms/cycle `[M]` |
-| **Target pose in BASE frame** (converted analytically from Model 1's head-frame output) | 2 × 7 × H | **CHANGED** | Makes Model 2's input frame match its joint-space output frame; removes the unsupervised self-calibration burden. One SE(3) compose (µs) against a 214 ms budget. This is what EgoVLA does at deployment — *outside* the network `[PP]` |
-| Arm joints | 14 | prior | unchanged |
-| Wrist F/T | 2 × 6 | confirmed | The only non-kinematic input in the system |
-| **Contact-phase flag / predictor output** | 2 × 1 | **NEW** | Gating is what converts +2.9 pp into +23.2 pp `[PR]`. Also hardware-motivated: post-compensation F/T residual is ~0.5 N static but **~2 N in motion** `[V]`, so the wrench is largely garbage during fast free-space motion |
-| **Gripper aperture + grasp-contact state** | 2 × 2 | **NEW** | See Model 1 inputs |
-| `dt`, relative pose, j₁ | passthrough | **NEW** | Must reach the controller, not stop at the planner |
+**실패 시나리오:** 센서를 사고(FT300-S 2개 ≈ $3.9k `[V]`), 배선하고, payload-inertia identification까지 했는데, §5의 ablation에서 wrench를 0으로 해도 아무것도 안 바뀝니다 — 그것이 영향을 줄 수 있는 출력 채널이 애초에 없었기 때문입니다.
 
-### Model 2 — outputs (× H)
+### #3 — 인터페이스가 단일 스텝이고 duration 필드가 없음 (같은 결함, 같은 수정)
 
-| Field | Dim | Status | Why required |
-|---|---|---|---|
-| Arm joints | 14 | prior, **now chunked and residual-structured** | `q = IK_DLS(target, q_now) + Δθ(·)` |
-| **Stiffness / coordination mode per arm** (min. 2-level: free-space stiff / in-contact compliant; better: 6-axis mask or reference wrench) | 2 × 1 … 2 × 6 | **NEW** | Otherwise the F/T sensor has no actuation path (§3.2) |
-| **Gripper aperture command** | 2 × 1 | **NEW** | Blocking without it |
+**Chunking:** ACT 실측 **k=1에서 1% vs k=100에서 44%** `[PR]`. 그것도 놓친 스텝의 비용이 20ms인 50Hz 플랫폼에서였습니다. 여기서는 두 모델이 MPS에 같이 있으면 전체 2단 사이클이 경합 하에서 ~430ms p50 / 578ms p99 — **1.7–2.3Hz** 루프, 무감(blind) 구간이 ~21배 `[M]`. 올바른 CPU/GPU placement에서도 Model 1은 4.2–4.5Hz입니다.
 
-**If forced to cut to the bone, the irreducible three are: aperture, chunk-with-durations, and relative pose.** Stiffness can start as a fixed schedule keyed to task phase; the redundancy scalar can start as a posture task inside the IK.
+**Duration:** `dt` 없는 waypoint는 궤적이 아닙니다. 저수준이 쓸 수 있는 유일한 속도는 Δ포즈 ÷ 추론 도착 간격 — 즉 **명령된 접근 속도가 GPU 스케줄링의 함수가 됩니다.** 접근 속도는 0.02–0.16m/s 구간에서 충격력에 선형 비례하는 것으로 측정돼 있습니다 `[PR]`. 실측 jitter를 적용하면: 10mm 스텝이 214ms에 오면 47mm/s, 같은 스텝이 289ms에 오면 35mm/s → **동일한 명령 포즈에 대해 실행마다 접촉력 ~35% 변동** `[I from M]`.
+
+**Compliance로는 구제할 수 없습니다.** 실측: 강성을 낮추면 충격 후 jerk에는 영향을 주지만 충격력 자체에는 "no significant effect on impact forces, because the robot has to make the contact for the error and stiffness term in the feedback control loop to come into effect"(피드백 루프의 오차·강성 항이 작동하려면 먼저 접촉이 일어나야 하기 때문) `[PR]`. duration과 stiffness는 서로 다른 문제를 푸는 직교 필드입니다.
+
+**실패 시나리오:** 삽입이 실험실에서는 성공하고 현장에서는 간헐적으로 대상을 부수거나 튕겨 나옵니다. 명령 포즈는 그대로인데 — 차이는 그 순간 GPU에 어떤 다른 프로세스가 있었는가입니다.
+
+### #4 — Model 2가 헤드 프레임 목표를 소비하고 base 프레임 관절을 출력하는데 헤드 관절 상태가 없음
+
+이전 리뷰의 "변환이 없으므로 식별 불가"는 **너무 강한 주장**입니다: Model 2는 관절 14개와 헤드 이미지를 갖고 있고, 로봇 자신의 손이 대개 화면 안에 있으므로, `B_T_H = FK_B(q)·(H_T_hand_observed)⁻¹`는 마커 없는 eye-hand self-calibration입니다. 변환은 **약하게 관측 가능(weakly observable)** 합니다.
+
+진짜 결함은 부재보다 나쁩니다 — **조용하기 때문입니다.** 이 채널은 (i) 정확히 헤드가 움직일 때 실패합니다 — 손이 잡은 물체에 가려지거나 224×224 FOV 밖으로 나갈 때. (ii) 광축 방향, 즉 파지가 의존하는 깊이 방향에서 조건이 가장 나쁩니다. (iii) 어떤 손실 항도 이것을 요구하지 않습니다. (iv) 정적 배경 단서로 상수 `B_T_H`를 암기하는 더 싼 지름길에 집니다 — "collapses when workspace geometry or camera placement shifts"(작업공간 기하나 카메라 배치가 바뀌면 붕괴)로 문서화된 실패입니다 `[PR]`.
+
+**정량화:** 실측 214/289ms에서, 완만한 **30°/s** 헤드 팬이 0.5m 도달거리 기준 **56–76mm**의 측방 오차를 주입합니다(60°/s → 112–151mm). DLR은 신뢰성 있는 조작에 **3.1mm** 절대 정확도가 필요했습니다 `[M]` + `[PR]`. 정적 목 캘리브레이션은 0.5m에서 도당 8.7mm를 더하고, DLR의 무캘리브레이션 전체 체인 수치는 **21mm**였습니다 `[PR]`.
+
+**Model 2의 입력만이 아니라 Model 1의 라벨도 오염시킵니다.** Model 1은 "헤드 프레임"의 *미래* 포즈를 예측하는데, head-frame-at-t+k ≠ head-frame-at-t입니다. EgoVLA가 정확히 이 문제에 부딪혀 world 프레임 카메라 포즈로 미래 손목 포즈를 재투영하는 것으로 해결합니다 `[PP]`.
+
+**새 F/T 입력과의 2차 상호작용:** 헤드 프레임은 중력 정렬이 아니고 목 pitch와 함께 기웁니다. 따라서 헤드 프레임 목표와 중력이 실린 wrench는 미관측 헤드 상태에 의존하는, 서로 불일치하는 프레임에 있게 됩니다 `[I]`.
+
+**실패 시나리오:** 깨끗한 학습 곡선, 깨끗한 in-distribution 검증, 그다음 현장에서 카메라 범프, 작업공간 재배치, 또는 학습 조작자들보다 헤드를 더 움직이는 배포 환경에서 점진적 드리프트. **가능한 실패 중 최악의 부류: 조용한 실패입니다.**
+
+### #5 — 7-DoF × 2가 6-DoF 포즈 인터페이스를 증명 가능하게 underdetermined로 만듦
+
+6-DoF 포즈는 7-DoF 형상을 결정하지 않습니다. Franka Panda 모델에서 엔드이펙터 포즈를 1e-12m로 고정하고 측정: **관절 1이 316°, 관절 5가 278° 스윕하고, 팔꿈치가 반경 0.239m 원 위에서 0.467 × 0.438 × 0.240m 박스를 훑습니다** `[M]`. 엔드이펙터 운동이 0인데 팔꿈치가 반 미터를 움직이는 것 — 이것이 기하학적으로 말한 중복성 문제입니다.
+
+두 가지 귀결:
+
+- **Model 1은 자기 팔꿈치를 볼 수도 명령할 수도 없습니다.** 물리적으로 다른 두 14-DoF 상태가 대뇌에게는 같은 상태입니다. 포즈만의 상태는 플랜트에 대해 **Markov가 아닙니다.** 자기 계획이 팔꿈치를 선반에 박아 넣는다는 것을 감지할 수 없습니다. 모든 자세 선택이 조용히 Model 2에 위임되고, Model 2는 캐비닛 작업에서 팔꿈치 관련 장애물을 담고 있지 않은 경우가 많은 헤드 이미지로부터 그것을 재추론해야 합니다.
+- **self-motion manifold에 대한 L2 회귀는 manifold 밖 형상을 만듭니다.** Δψ만큼 다른 두 유효 IK 해를 관절 공간에서 평균했을 때의 실측 엔드이펙터 오차: **10° → 1.9mm, 30° → 17.6mm, 45° → 38.5mm, 60° → 50.3mm, 90° → 96.2mm** `[M]`. Model 2는 현재 `q`에 조건화되어 연속성으로 분기가 고정되므로, 유효한 양은 전체 310° manifold가 아니라 **당신의 데모 데이터에 남은 ψ 산포**입니다.
+
+**수정은 싸고, 증명 가능하게 무비용입니다:** Model 1의 입력과 출력에 **팔당 스칼라 1개** — base joint j₁(ERJ) — 를 추가하십시오. 12 → 14개 숫자. 기록된 관절에 FK를 돌려 자동 라벨링, **샘플당 ~34µs, 100만 스텝당 ~35초** `[M]`, 사람 노력 0. ablation: 홀수(비틀림) 관절은 작동하고, 짝수(굽힘) 관절은 성능 붕괴를 일으키며, base joint가 "by a large margin"으로 최선 `[PR]`. 좁지 않은 작업에서 redundancy-aware 공간은 작업공간과 "completely in line" — **엄격히 우세(strictly dominant)합니다.**
+
+**기하학적 arm angle이 아니라 ERJ(j₁)를 쓰십시오:** ERA는 invalid-action 비율이 더 높았고 제어에 DLS 솔버가 필요했습니다. arm angle을 굳이 쓴다면 **stereographic SEW** 정의를 쓰십시오 — 알고리즘적 특이점은 피할 수 없지만(Hairy Ball Theorem), 관례적인 고정 기준 형태는 *작업공간을 관통하는 직선 전체에서* 특이하고 거기서 조용히 불연속 라벨을 만들어냅니다 `[PR]`.
+
+**추가로:** 손목 F/T는 팔꿈치/전완 접촉에 구조적으로 눈이 멉니다 — 손목 센서는 손목을 통해 전달되는 wrench만 측정합니다. 좁은 공간의 7-DoF 작동에서 부딪히는 것이 바로 팔꿈치인데, 새 센서도 (FOV 밖이면) 헤드 카메라도 그것을 잡지 못합니다. **남는 유일한 방어선은 IK 내부의 hard collision constraint입니다.**
+
+### #6 — 손간 상대 포즈 없음
+
+UMI 양팔 천 접기 실측 **70% (14/20) vs 30% (6/20)**. "a critical ingredient to enable bimanual policy"(양팔 정책을 가능하게 하는 결정적 요소)로 기술됨 `[PR]`. 실패 양상은 *타이밍*(비동기 파지)인데 이를 고치는 것은 *공간* 필드입니다 — 상대 포즈가 정책에게 "두 손이 지금 제 위치에 있다"를 표현하게 해주기 때문입니다.
+
+**두 절대 포즈를 빼서 복구할 수 없습니다.** 결정적 논거는 산술이 아니라 손실입니다: 두 절대 포즈에 대한 L2 손실은 무해한 공통 모드 5mm 오차와 물체를 부수는 차동 5mm 오차를 **동일하게** 벌합니다. 네트워크는 상대 구속을 보존하라는 gradient 압력을 한 번도 받지 않습니다 `[I]`. (부차적으로: UMI는 등록된 공유 프레임에서 상대 포즈를 10.1mm / 0.8°로 *측정*했고, 효과는 시각적 겹침이 작을 때 가장 컸습니다 — 정보 가용성에 관한 발견입니다.)
+
+### #7 — 타임스탬프 없음, 헤드/토르소 관절 상태 없음, 불확실성 없음
+
+당장의 비용은 가장 낮지만, duration이 추가되는 순간 타임스탬프는 **필수**가 되고(두 모델이 합의하는 시계 없는 `dt`는 무의미), 헤드/토르소 관절 상태는 *촬영* 시각의 `B_T_H` 계산에 필요합니다. Helix가 도달을 위해 토르소를 움직인다는 점에 유의하십시오 `[V]` — 이 플랫폼의 토르소가 움직인다면 헤드 관절만으로는 불충분하고, 카메라→arm-base 전체 체인이 필요합니다. *(참고: 이후 REV.2에서 G1의 토르소가 상시 움직인다는 것이 확정됨)*
 
 ---
 
-## 5. Revised diagnostic experiment set
+## 4. 개정된 최소 인터페이스 스펙
 
-The prior review proposed a two-way ablation (RGB present/absent). With F/T confirmed, **the ablation must be three-way**, because the diagnoses are distinguishable only by the *pattern* across all three channels.
+7-DoF × 2 + 손목 F/T 기준. `H` = chunk 길이. **H = 8 권장** (Diffusion Policy의 실측 최적 Ta=8과 일치; 50Hz에서의 ACT k=100을 이 플랫폼의 rate로 환산하면 ≈4–8).
 
-### Protocol
+### Model 1 — 입력
 
-Freeze one trained Model 2. At inference, replace each input with (a) zeros and (b) a version shuffled across trajectories — shuffling controls for "zero is out of distribution." Measure **Δ success rate** and **Δ joint-trajectory MSE**, and report all of them **split by contact vs free-space timesteps** (per FIRST's 84 % / 2.9 % split `[PP]`), and **on held-out object stiffness/weight** (ALPHA-α protocol) as well as training objects. The held-out split is mandatory: FACTR found all methods tie on *training* objects and diverge only on unseen ones `[PP]`.
+| 필드 | 차원 | 상태 | 왜 필요한가 |
+|---|---|---|---|
+| 헤드 카메라 이미지 | 224×224×3 | 기존 | 변경 없음 |
+| 양손 포즈 (헤드 프레임) | 2 × 7 | 기존 | 변경 없음. 헤드 프레임 유지 — OC-VLA의 실기체 +10.0pp 이득은 포즈 출력 모델에 적용됩니다 `[PR]` |
+| **중복성 스칼라 (base joint j₁), 팔별** | 2 × 1 | **신규** | 없으면 대뇌의 상태가 14-DoF 플랜트에 대해 Markov가 아니고, 자신의 실행 불가능한 계획을 감지할 수 없습니다(§3.5). 자동 라벨링, ~34µs/샘플 `[M]` |
+| **그리퍼 aperture, 측정값, 손별** | 2 × 1 | **신규** | 대뇌는 다음 포즈를 계획하려면 손이 지금 무언가를 쥐고 있는지 알아야 합니다 |
+| **파지 접촉 플래그, 손별** | 2 × 1 | **신규** | "파지 닫힘"과 "빈손 닫힘"을 구분. 교란 하에서 10–30% → 100% `[PP]` |
+| **헤드 (및 토르소) 관절 상태** | n | **신규** | 라벨 재투영과 `B_T_H` 계산에 필요(§3.4) |
+| **촬영 타임스탬프** | 1 | **신규** | `B_T_H`는 추론 시각이 아니라 촬영 시각에 평가되어야 합니다 |
 
-Symbols below: **0** = statistically indistinguishable from the unablated model; **↓** = significant degradation.
+### Model 1 — 출력 (waypoint별, × H)
 
-### Decision table
+| 필드 | 차원 | 상태 | 왜 필요한가 |
+|---|---|---|---|
+| 양손 포즈 (헤드 프레임) | 2 × 7 | 기존, **이제 chunk** | k=1 → k=100에서 1% → 44% `[PR]`; 여기서는 2–5Hz라 더 나쁨 |
+| **waypoint별 `dt`** | 1 | **신규** | waypoint 목록을 궤적으로 바꿉니다. 없으면 접근 속도 = Δ포즈 ÷ GPU jitter → 접촉력 ~35% 변동 `[I from M]` |
+| **그리퍼 aperture, continuous** | 2 × 1 | **신규** | 시스템의 다른 어떤 것도 손을 명령할 수 없습니다. binary가 아니라 continuous — 암묵적 파지력 채널이기도 합니다 `[PR]` |
+| **중복성 스칼라 j₁, 팔별** | 2 × 1 | **신규** | §3.5의 명령 가능한 절반 |
+| **손간 상대 포즈, 별도 supervision** | 7 | **신규** | 70% vs 30% `[PR]`; L2 손실 하에서 뺄셈으로 유도 불가 `[I]` |
+| waypoint별 불확실성 (선택) | 2 × 1 | **신규, 선택** | Model 2가 언제 해석적 경로에 양보할지 결정하게 해줍니다 |
 
-| RGB | F/T | Pose | Diagnosis | Action |
+**H=8 기준 크기:** 8 × (포즈 14 + aperture 2 + j₁ 2 + 상대 7 + dt 1) ≈ **float 208개.** 60.6ms짜리 비전 인코더 대비 < 0.1ms `[M]` — **현재의 최소 인터페이스에 성능상의 논거는 없습니다.**
+
+### Model 2 — 입력
+
+| 필드 | 차원 | 상태 | 왜 필요한가 |
+|---|---|---|---|
+| 헤드 카메라 이미지 (또는 **공유 인코더 토큰**) | 196 × d | 기존, **유지** | 삭제 논거 반박됨(§1, 항목 2c). 공유 비용은 14.6ms/사이클 `[M]` |
+| **BASE 프레임 목표 포즈** (Model 1의 헤드 프레임 출력에서 해석적으로 변환) | 2 × 7 × H | **변경** | Model 2의 입력 프레임을 관절 공간 출력 프레임과 일치시키고, unsupervised self-calibration 부담을 제거합니다. 214ms 예산 대비 SE(3) compose 1회(µs). EgoVLA가 배포 시 — *네트워크 밖에서* — 하는 것이 바로 이것입니다 `[PP]` |
+| 팔 관절 | 14 | 기존 | 변경 없음 |
+| 손목 F/T | 2 × 6 | 확정 | 시스템에서 유일한 비기구학적 입력 |
+| **contact-phase 플래그 / 예측기 출력** | 2 × 1 | **신규** | gating이 +2.9pp를 +23.2pp로 바꾸는 것입니다 `[PR]`. 하드웨어 근거도 있습니다: 보상 후 F/T 잔차가 정지 시 ~0.5N인데 **운동 중 ~2N** `[V]` — 빠른 자유공간 운동 중 wrench는 대부분 쓰레기입니다 |
+| **그리퍼 aperture + 파지 접촉 상태** | 2 × 2 | **신규** | Model 1 입력 참조 |
+| `dt`, 상대 포즈, j₁ | passthrough | **신규** | 플래너에서 멈추지 말고 컨트롤러까지 도달해야 합니다 |
+
+### Model 2 — 출력 (× H)
+
+| 필드 | 차원 | 상태 | 왜 필요한가 |
+|---|---|---|---|
+| 팔 관절 | 14 | 기존, **이제 chunk + residual 구조** | `q = IK_DLS(target, q_now) + Δθ(·)` |
+| **팔별 stiffness / coordination mode** (최소 2단계: 자유공간 stiff / 접촉 compliant. 더 좋게는 6축 mask 또는 reference wrench) | 2 × 1 … 2 × 6 | **신규** | 없으면 F/T 센서에 구동 경로가 없습니다(§3.2) |
+| **그리퍼 aperture 명령** | 2 × 1 | **신규** | 없으면 blocking |
+
+**뼈만 남기라면, 줄일 수 없는 셋은: aperture, duration이 붙은 chunk, 상대 포즈입니다.** stiffness는 task phase에 연동된 고정 스케줄로 시작할 수 있고, 중복성 스칼라는 IK 내부의 자세 태스크로 시작할 수 있습니다.
+
+---
+
+## 5. 개정된 진단 실험 세트
+
+이전 리뷰는 2방향 ablation(RGB 유/무)을 제안했습니다. F/T가 확정된 지금 **ablation은 3방향이어야 합니다** — 진단이 세 채널 전체에 걸친 *패턴*으로만 구별되기 때문입니다.
+
+### 프로토콜
+
+학습된 Model 2 하나를 동결합니다. 추론 시 각 입력을 (a) 0으로, (b) 궤적 간 셔플된 버전으로 교체합니다 — 셔플은 "0은 분포 밖"이라는 교란을 통제합니다. **Δ 성공률**과 **Δ 관절 궤적 MSE**를 측정하되, 전부 **접촉 vs 자유공간 타임스텝으로 나눠**(FIRST의 84% / 2.9% 분할 기준 `[PP]`), 그리고 학습 물체만이 아니라 **held-out 물체 강성/무게에서도**(ALPHA-α 프로토콜) 보고합니다. held-out 분할은 필수입니다: FACTR는 모든 방법이 *학습* 물체에서는 동률이고 미지 물체에서만 갈라진다는 것을 발견했습니다 `[PP]`.
+
+기호: **0** = ablation 없는 모델과 통계적으로 구별 불가; **↓** = 유의한 저하.
+
+### 판정표
+
+| RGB | F/T | Pose | 진단 | 조치 |
 |---|---|---|---|---|
-| 0 | 0 | ↓ | **Pure learned IK.** The prior review's original verdict is confirmed after all. | Delete the learned low level. Use `IK_DLS` (5.31 µs `[M]`) + admittance. |
-| ↓ | 0 | ↓ | **Visuomotor servo + IK; the wrench is dead.** The ForceVLA/+2.9 pp regime. | Do *not* conclude force is useless. First check the teleop rig (§7 of newly-raised), then add gating/curriculum/reweighting, then re-run. If still 0, drop the sensor and save the BOM. |
-| ↓ | ↓ *(contact only)* | ↓ | **Intended behaviour.** Vision for phase/redundancy, force for contact, pose for the target. | Ship this structure. Proceed to the baseline comparison below. |
-| ↓ | ↓ *(free space too)* | ↓ | **Wrench is leaking non-force information** — gravity/inertia signature encoding arm configuration or object identity, i.e. a proxy for kinematics. | Fix payload-inertia compensation before believing any force result. Note ~2 N residual in motion `[V]`. |
-| 0 | ↓ | ↓ | **Image is redundant given pose + wrench for this task class.** The prior review's "delete RGB" advice is correct *here*. | Delete the image **only after** separately verifying elbow-obstacle and redundancy-resolution cases, which are the two things the image was retained for. |
-| ↓ | ↓ | 0 | **The target is being ignored.** Model 2 is running an open-loop visuomotor policy; Model 1 is decorative. | The two-model split has no function. Collapse to a single model, or fix the pose-conditioning path (likely the frame mismatch, §3.4). |
-| 0 | 0 | 0 | **Nothing is being used** — trajectory/phase memorization. | Data or eval design is broken. Stop and fix before any architecture decision. |
+| 0 | 0 | ↓ | **순수 학습된 IK.** 이전 리뷰의 원래 판정이 결국 옳았던 것 | 학습된 저수준 삭제. `IK_DLS`(5.31µs `[M]`) + admittance 사용 |
+| ↓ | 0 | ↓ | **visuomotor servo + IK. wrench는 죽어 있음.** ForceVLA의 +2.9pp 영역 | 힘이 무용하다고 결론짓지 *마십시오*. 먼저 텔레옵 리그를 확인하고(§신규 N7), gating/curriculum/reweighting을 추가한 뒤 재실행. 그래도 0이면 센서를 빼고 BOM을 아끼십시오 |
+| ↓ | ↓ *(접촉에서만)* | ↓ | **의도된 거동.** 비전은 phase/중복성, 힘은 접촉, 포즈는 목표 | 이 구조로 출하. 아래 baseline 비교로 진행 |
+| ↓ | ↓ *(자유공간에서도)* | ↓ | **wrench가 힘 아닌 정보를 누출 중** — 중력/관성 시그니처가 팔 형상이나 물체 정체를 인코딩, 즉 기구학의 프록시 | 어떤 힘 결과든 믿기 전에 payload-inertia 보상부터 고치십시오. 운동 중 잔차 ~2N에 유의 `[V]` |
+| 0 | ↓ | ↓ | **이 작업 부류에서는 포즈 + wrench가 있으면 이미지가 잉여.** 이전 리뷰의 "RGB 삭제" 조언이 *여기서는* 옳음 | 이미지를 삭제하되 **반드시 그 전에** 팔꿈치-장애물 케이스와 중복성 해소 케이스를 별도 검증 — 이미지를 유지한 이유가 그 둘입니다 |
+| ↓ | ↓ | 0 | **목표가 무시되고 있음.** Model 2는 개루프 visuomotor 정책을 돌리는 중이고 Model 1은 장식 | 2모델 분리에 기능이 없습니다. 단일 모델로 접거나, 포즈 conditioning 경로를 고치십시오(아마 §3.4의 프레임 불일치) |
+| 0 | 0 | 0 | **아무것도 안 쓰이는 중** — 궤적/phase 암기 | 데이터나 평가 설계가 깨졌습니다. 어떤 아키텍처 결정도 하기 전에 멈추고 고치십시오 |
 
-### Supporting diagnostics (all cheap, run alongside)
+### 보조 진단 (전부 저렴, 병행 실행)
 
-- **D2 — Analytic residual.** Compute `r = q_model − IK_DLS(target, q_now)`. If ‖r‖ sits at IK numerical tolerance, the model learned nothing but IK. Then **plot ‖r‖ against ‖wrench‖**: a force-using model shows correlation; a shortcut model shows none.
-- **D3 — Sensitivity signature.** `∂q_out/∂wrench` by finite difference, computed *separately* on in-contact and free-space steps. The correct signature is ≈0 in free space, clearly nonzero in contact. A **flat** profile means the wrench is being treated as noise.
-- **D4 — Camera/scene shift.** Move the camera or re-layout the background and re-evaluate. Collapse here confirms the `B_T_H`-from-background shortcut `[PR]`.
-- **D5 — ψ spread audit.** One FK pass over the existing dataset (~35 s per 1 M steps `[M]`); bin by (target pose, current q) and histogram the arm angle. Spread < 20° → L2 collapse costs < 8 mm, survivable. Spread > 60° → > 50 mm, redundancy scalar becomes mandatory `[M]`.
-- **D6 — Beat the honest baseline.** `IK + sensorless admittance from motor current` (egg-on-bread 80 % vs 40 %, 0.69 N force estimation from servo signals, no sensor, no learning `[PP]`). If Model 2 does not beat this, the learned low level is not earning its cost.
-- **D7 — Budget for the null.** The observed range of naive force-concat effect across published papers is **−2.5 pp to +39.9 pp**; ForceMimic reported force-input models performing outright poorly once contact began `[PP]`. Decide *in advance* what happens if the measured delta is ~0.
+- **D2 — 해석적 residual.** `r = q_model − IK_DLS(target, q_now)`를 계산하십시오. ‖r‖이 IK 수치 허용오차 수준이면 모델은 IK 외에 아무것도 배우지 않은 것입니다. 그다음 **‖r‖을 ‖wrench‖에 대해 플롯**하십시오: 힘을 쓰는 모델은 상관을 보이고, 지름길 모델은 안 보입니다.
+- **D3 — 민감도 시그니처.** 유한 차분으로 `∂q_out/∂wrench`를 접촉 스텝과 자유공간 스텝에서 *따로* 계산하십시오. 올바른 시그니처는 자유공간에서 ≈0, 접촉에서 명확히 0이 아닌 것입니다. **평평한** 프로파일은 wrench가 노이즈로 취급되고 있다는 뜻입니다.
+- **D4 — 카메라/장면 이동.** 카메라를 옮기거나 배경을 재배치하고 재평가하십시오. 여기서 붕괴하면 배경으로부터의 `B_T_H` 지름길이 확인됩니다 `[PR]`.
+- **D5 — ψ 산포 감사.** 기존 데이터셋에 FK 1회(100만 스텝당 ~35초 `[M]`); (목표 포즈, 현재 q)로 binning 후 arm angle 히스토그램. 산포 < 20° → L2 붕괴 비용 < 8mm, 생존 가능. 산포 > 60° → > 50mm, 중복성 스칼라 필수 `[M]`.
+- **D6 — 정직한 baseline을 이겨라.** `IK + 모터 전류 기반 sensorless admittance`(계란-빵 80% vs 40%, 서보 신호로 0.69N 힘 추정, 센서 없음, 학습 없음 `[PP]`). Model 2가 이것을 못 이기면, 학습된 저수준은 제 비용을 못 벌고 있는 것입니다.
+- **D7 — 무효(null) 결과에 대비한 예산.** 출판된 논문들에서 관측된 단순 force-concat 효과의 범위는 **−2.5pp ~ +39.9pp**입니다. ForceMimic은 접촉이 시작되자 force-input 모델이 노골적으로 나빠졌다고 보고했습니다 `[PP]`. **측정 delta가 ~0이면 어떻게 할지 *미리* 정해두십시오.**
 
-Note that the field's standard practice — attention visualization, used by both FACTR and FACTR-2 — is **strictly weaker evidence** than the zeroing ablation. FACTR itself ran no zeroing ablation `[PP]`.
-
----
-
-## 6. Does the recommendation still stand?
-
-**Partially. The sequencing preference survives; the specific first build changes, and the baseline gets harder.**
-
-**What changes:**
-
-- **"The two-model design is dominated" is withdrawn.** It is not dominated: measured, one model on this hardware is either 4 Hz *or* small, and the classical spine cannot capture object-property generalization `[M]`, `[PP]`.
-- **Build the shared-encoder two-head variant first, not the single-model CIR-1.** It is the single-model code plus one head; it dominates on rate; and it makes the decisive §5 diagnostic cheap because both heads are already wired to the same tokens. The measured cached-token path is the reason: Model 2's head on cached vision tokens runs at **5076 Hz p50 / 4149 Hz p99 / 1965 Hz worst-case on one CPU thread under full GPU load** `[M]` — that is how you get a >1 kHz F/T reflex, not by deleting the image.
-- **Placement is a decision, not a default.** M1-on-GPU + M2-on-CPU maximizes Model 2's median (59.5 Hz p50, but 28 Hz worst-case). Both-on-CPU gives better Model 1 rate (5.2 Hz) and a tighter Model 2 tail (32.6 Hz worst) at 41.3 Hz p50 `[M]`. **If worst-case jitter is the binding safety constraint, both-on-CPU is arguably the better engineering choice despite the lower median.** Never both-on-MPS.
-- **Raise the go/no-go bar.** The comparator is IK + sensorless admittance, not bare position control (§2, D6).
-
-**What does not change:**
-
-- **The classical spine is still mandatory**, as the baseline every learned variant must beat, and as the fallback controller.
-- **Sequencing still starts with the simplest thing that can be measured**, not with the full architecture.
-
-**Two gates that precede all architecture work:**
-
-1. **The gripper channel must exist.** All architecture sequencing is moot while grasping success is structurally 0 %.
-2. **Verify the teleop rig gives force feedback to the operator.** If not, the wrench channel carries no learnable structure and every force-related decision above is premature.
-
-**Two decisions to re-open:**
-
-- **Buy vs estimate the F/T sensor.** 2× FT300-S ≈ $3.9 k plus wiring, a startup re-bias routine, mandatory 10-parameter payload-inertia identification, a hard **100 Hz** output ceiling, and ~2 N residual noise during motion `[V]`. NEXT gets **0.018 ± 0.012 Nm** from motor current on a $2 500 arm with 10 min of data and $0 hardware `[PP]`. Buy the sensor only if you need clean 6-axis wrist wrench for low-magnitude fingertip contacts or torque-about-tool-axis (screwing). Note the 100 Hz ceiling independently confirms the fast loop cannot be the learned model.
-- **Scope sim-then-real to free-space/kinematic behaviour.** Contact stiffness, friction, and F/T noise/drift are precisely what simulators get wrong; essentially none of the force-policy results in the literature are sim-to-real — nearly all train on real teleop data `[PP]`.
+이 분야의 표준 관행 — FACTR와 FACTR-2 둘 다 쓴 attention 시각화 — 은 zeroing ablation보다 **엄격히 약한 증거**임에 유의하십시오. FACTR 자신은 zeroing ablation을 하지 않았습니다 `[PP]`.
 
 ---
 
-## 7. Contradictions this document has not resolved
+## 6. 권고는 여전히 유효한가?
 
-These are real tensions between the research pass, the adversarial pass, and the measurements. They are stated, not smoothed.
+**부분적으로. 순서 선호는 살아남고, 구체적인 첫 빌드가 바뀌며, baseline이 더 어려워집니다.**
 
-**7.1 — The image in Model 2: "delete it" vs "keep it." Unresolved on the merits.**
-The research pass concluded the head image "is now the single worst element of the design and should be deleted," reasoning that Model 2's job is contact-phase reasoning and force-dependent correction, that Model 1 already consumed the image, and that a 38-dim MLP would run at hundreds of Hz. The adversarial pass and the measurements refute both *cost* arguments (`[M]`: sharing saves 6 %, and Model 2 with its own ViT-S hits 50 Hz p99 on CPU) and supply two positive arguments for retention (redundancy resolution; F/T's structural blindness to elbow contact).
+**바뀌는 것:**
 
-**But the research pass's remaining argument survives and is not answered by the measurements:** the image is what the optimizer will latch onto, and every paper that measured it found policies "overfit to using visual modality, effectively disregarding force data," with 80–90 % of attention on vision tokens absent a curriculum `[PP]`. That is an argument for a **modality curriculum or contact gate**, not for deletion — but I cannot prove the gate is sufficient. **This document recommends retention. That recommendation is contingent on the §5 ablation coming back with a nonzero, contact-localized F/T sensitivity.** If it does not, deleting the image becomes live again.
+- **"2모델 설계는 지배당한다(dominated)"는 철회합니다.** 지배당하지 않습니다: 실측상 이 하드웨어의 단일 모델은 4Hz*이거나* 작거나 둘 중 하나이고, 고전 척추는 물체 속성 일반화를 포착할 수 없습니다 `[M]`, `[PP]`.
+- **단일 모델 CIR-1이 아니라 공유 인코더 + 2헤드 변형을 먼저 만드십시오.** 단일 모델 코드에 헤드 하나를 더한 것이고, rate에서 우세하며, 두 헤드가 이미 같은 토큰에 연결돼 있어 결정적인 §5 진단이 싸집니다. 실측된 cached-token 경로가 그 이유입니다: **캐시된 비전 토큰 위의 Model 2 헤드는 GPU 완전 부하 중 CPU 1스레드에서 5,076Hz p50 / 4,149Hz p99 / 최악 1,965Hz** `[M]` — **>1kHz F/T reflex는 이미지를 지워서가 아니라 이렇게 얻는 것입니다.**
+- **placement는 기본값이 아니라 결정 사항입니다.** M1-GPU + M2-CPU는 Model 2의 중앙값을 최대화합니다(59.5Hz p50, 단 최악 28Hz). 둘 다 CPU는 Model 1 rate가 더 좋고(5.2Hz) Model 2 꼬리가 더 조입니다(최악 32.6Hz, p50 41.3Hz) `[M]`. **최악 jitter가 안전상 구속 조건이라면, 중앙값이 낮아도 둘-다-CPU가 더 나은 엔지니어링 선택일 수 있습니다. 둘 다 MPS는 절대 금지.**
+- **go/no-go 기준을 올리십시오.** 비교 대상은 맨 위치 제어가 아니라 IK + sensorless admittance입니다(§2, D6).
 
-**7.2 — Shared encoder: "don't share" vs "share."**
-§1 (item 2a) argues sharing is not worth adopting *as a compute optimization* (6 % saving) and that it pins Model 2's vision to Model 1's 4–5 Hz. §6 recommends building the shared-encoder variant first. These are reconciled only by the cached-token reflex head — which is exactly the configuration that makes the coupling tolerable. If for any reason the reflex head is not built, the shared encoder is a rate liability and Model 2 should get its own ≤25 M-param encoder.
+**바뀌지 않는 것:**
 
-**7.3 — "The wrench justifies a learned low level" vs "the objective will still make it learn IK."**
-Both are asserted in this document and both are correct at different levels. The information degeneracy is retired; the optimization degeneracy is not. Nothing in the evidence guarantees the residual structure + gating will actually recover the force behaviour on *this* data. **The §5 ablation is the only thing that settles it, and it should be treated as a gate on further investment in Model 2, not as a post-hoc analysis.**
+- **고전 척추는 여전히 필수입니다** — 모든 학습 변형이 이겨야 할 baseline이자 fallback 컨트롤러로서.
+- **순서는 여전히 측정 가능한 가장 단순한 것에서 시작합니다.** 전체 아키텍처에서가 아니라.
 
-**7.4 — The prior review's headline numbers were partly wrong, and one of them is a citation error I am correcting rather than defending.**
-- The **8 % / 94 % / 96 %** figure is real and reproduced exactly (row-means of RA-L 2024 Table I) but classifies by *final* action; Model 2 outputs joints, so it is in the 96 % column. Quoting 8 % against this architecture is a factual error.
-- The **"14 % vs 29 %"** OC-VLA degradation figure used previously **does not exist in the paper**. The token "29" appears nowhere. The actual comparison is 14.0 pp (OC-VLA) vs 21.3 pp (OpenVLA-OFT) / 16.7 pp (base frame) / 16.0 pp (π0) `[PR]`. Any argument sized on a 15-point advantage must be re-sized to ~2.7–7 points.
-- The **4.7 Hz** cap that drove the "delete RGB" conclusion — and coloured the conclusions on the split and the sequencing — was an artifact of co-scheduling both models on MPS. **Any future latency claim in this project must state device placement**, because on this machine CPU beats MPS at batch 1 at every Model 2 size tested (ViT-B: **44.7 ms CPU fp32 vs 64.2 ms MPS fp16**), batch-1 inference being dispatch-bound (~179 µs per MPS dispatch vs ~1 µs CPU; 15 % of peak GPU utilization) rather than FLOP-bound `[M]`.
+**모든 아키텍처 작업에 선행하는 두 게이트:**
 
-**7.5 — The two largest problems in the design appear nowhere in the prior review, and both outrank every conclusion it reached.** The absent gripper channel and the F/T sensor's missing actuation path are not refinements of the prior analysis; they are things the prior analysis did not see. That is a methodological finding in itself: the prior review reasoned about *model structure* and never audited the *actuator coverage* of the output vector.
+1. **그리퍼 채널이 존재해야 합니다.** 파지 성공률이 구조적으로 0%인 동안 모든 아키텍처 순서 논의는 무의미합니다.
+2. **텔레옵 리그가 조작자에게 힘 피드백을 주는지 검증하십시오.** 아니라면 wrench 채널에 학습 가능한 구조가 없고, 위의 모든 힘 관련 결정이 시기상조입니다.
 
-**7.6 — Things the evidence does not settle, at all.**
-- **The arm command interface** (torque/impedance vs joint-position only) is unstated and changes the correct architecture qualitatively. Nothing here resolves it.
-- **Whether the teleop rig is bilateral.** Decisive, unknown, checkable in an afternoon.
-- **Whether "양손" is parallel-jaw or multi-finger.** Changes the gripper fix from 2 dims to 24–44.
-- **Whether the head is actuated, and whether the torso moves.** The entire §3.4 verdict is conditional on this. Rigidly-mounted head → the design is OC-VLA-optimal as drawn. Live neck → silently biased. Moving torso → head joint state alone is insufficient.
-- **How often the hands are visible in the head image during these tasks.** This single number determines whether the self-calibration channel is usable or dead. Directly measurable from existing teleop logs (project both hands via FK into the head camera, count in-FOV unoccluded frames per task phase).
-- **No paper runs the comparison this project actually needs** — learned `(pose, joints, wrench) → joints` against analytic IK + admittance + a search primitive, on the same tasks and hardware. Force Policy omits any classical baseline; TER-DAgger has no impedance-only baseline. That gap is itself the argument for running it in-house rather than inferring it.
+**다시 열어야 할 두 가지 결정:**
+
+- **F/T 센서를 살 것인가, 추정할 것인가.** FT300-S 2개 ≈ $3.9k + 배선 + 시작 시 re-bias 루틴 + 필수적인 10-파라미터 payload-inertia identification + **100Hz** 하드 출력 상한 + 운동 중 ~2N 잔여 노이즈 `[V]`. NEXT는 $2,500짜리 팔에서 모터 전류로 **0.018 ± 0.012 Nm**를 데이터 10분, 하드웨어 비용 $0에 얻습니다 `[PP]`. 낮은 크기의 손끝 접촉이나 공구축 주위 토크(나사 조이기)에 깨끗한 6축 손목 wrench가 필요할 때만 센서를 사십시오. **100Hz 상한은 빠른 루프가 학습 모델일 수 없다는 것을 독립적으로 확인해줍니다.** *(참고: 이후 REV.2에서 G1에는 손목 F/T가 표준 탑재로 확정됨 — 단 데이터시트·보상 여부는 미확인)*
+- **sim-then-real의 범위를 자유공간/기구학 거동으로 한정하십시오.** 접촉 강성, 마찰, F/T 노이즈/드리프트가 정확히 시뮬레이터가 틀리는 것들입니다. 문헌의 force-policy 결과 중 sim-to-real은 사실상 없습니다 — 거의 전부 실기체 텔레옵 데이터로 학습합니다 `[PP]`.
+
+---
+
+## 7. 이 문서가 해소하지 못한 모순들
+
+리서치 pass, adversarial pass, 측정 사이의 실제 긴장들입니다. 뭉개지 않고 그대로 적습니다.
+
+**7.1 — Model 2의 이미지: "삭제하라" vs "유지하라." 본안에서 미해결.**
+리서치 pass는 헤드 이미지가 "이제 설계에서 단일 최악 요소이고 삭제되어야 한다"고 결론지었습니다 — Model 2의 역할이 contact-phase 추론과 힘 의존 보정이고, Model 1이 이미 이미지를 소비했으며, 38차원 MLP라면 수백 Hz로 돌 것이라는 논리였습니다. adversarial pass와 측정은 두 *비용* 논거를 모두 반박하고(`[M]`: 공유 절감 6%, 그리고 자체 ViT-S를 단 Model 2가 CPU에서 50Hz p99), 유지에 대한 두 가지 긍정 논거(중복성 해소; F/T의 팔꿈치 접촉에 대한 구조적 무지)를 제공합니다.
+
+**그러나 리서치 pass의 남은 논거는 살아남았고 측정으로 답해지지 않았습니다:** 이미지는 옵티마이저가 달라붙을 대상이고, 이를 측정한 모든 논문이 정책이 "overfit to using visual modality, effectively disregarding force data"(시각 modality에 과적합해 힘 데이터를 사실상 무시)하며 curriculum 없이는 attention의 80–90%가 비전 토큰에 간다는 것을 발견했습니다 `[PP]`. 이것은 삭제가 아니라 **modality curriculum 또는 contact gate**에 대한 논거입니다 — 하지만 gate가 충분하다는 것을 증명할 수는 없습니다. **이 문서는 유지를 권고합니다. 그 권고는 §5 ablation이 0이 아닌, 접촉에 국소화된 F/T 민감도를 보이는 것을 조건으로 합니다.** 그렇지 않으면 이미지 삭제가 다시 살아 있는 선택지가 됩니다.
+
+**7.2 — 공유 인코더: "공유하지 마라" vs "공유하라."**
+§1(항목 2a)은 공유가 *연산 최적화로서는* 채택할 가치가 없고(6% 절감) Model 2의 비전을 Model 1의 4–5Hz에 묶는다고 논증합니다. §6은 공유 인코더 변형을 먼저 만들라고 권고합니다. 이 둘은 **cached-token reflex 헤드로만 화해됩니다** — 그것이 정확히 이 결합을 견딜 만하게 만드는 구성입니다. 어떤 이유로든 reflex 헤드를 만들지 않는다면, 공유 인코더는 rate 부채이고 Model 2는 자체 ≤25M 파라미터 인코더를 가져야 합니다.
+
+**7.3 — "wrench가 학습된 저수준을 정당화한다" vs "목적함수는 여전히 IK를 학습하게 만들 것이다."**
+이 문서에서 둘 다 주장되고, 둘 다 서로 다른 수준에서 옳습니다. 정보 퇴화는 폐기됐고, 최적화 퇴화는 아닙니다. residual 구조 + gating이 *이* 데이터에서 실제로 힘 거동을 회복하리라는 것을 보장하는 근거는 아무것도 없습니다. **§5 ablation만이 이것을 판정하며, 사후 분석이 아니라 Model 2에 대한 추가 투자의 게이트로 취급해야 합니다.**
+
+**7.4 — 이전 리뷰의 헤드라인 수치 일부가 틀렸고, 그중 하나는 변호가 아니라 정정해야 할 인용 오류입니다.**
+- **8% / 94% / 96%** 수치는 실재하고 정확히 재현됩니다(RA-L 2024 Table I의 행 평균). 그러나 *최종* 행동 기준 분류입니다. Model 2는 관절을 출력하므로 96% 열에 속합니다. 이 아키텍처에 대해 8%를 인용하는 것은 사실 오류입니다.
+- 이전에 쓰인 OC-VLA 열화 수치 **"14% vs 29%"는 논문에 존재하지 않습니다.** "29"라는 토큰이 어디에도 안 나옵니다. 실제 비교는 14.0pp(OC-VLA) vs 21.3pp(OpenVLA-OFT) / 16.7pp(base 프레임) / 16.0pp(π0)입니다 `[PR]`. 15포인트 우위로 크기를 잡았던 모든 논증은 ~2.7–7포인트로 다시 잡아야 합니다.
+- "RGB 삭제" 결론을 이끌었고 분리와 순서에 대한 결론을 물들였던 **4.7Hz** 캡은 두 모델을 MPS에 공동 스케줄링한 아티팩트였습니다. **이 프로젝트의 모든 향후 latency 주장은 디바이스 placement를 명시해야 합니다** — 이 기기에서는 테스트한 모든 Model 2 크기에서 batch 1 기준 CPU가 MPS를 이기고(ViT-B: **CPU fp32 44.7ms vs MPS fp16 64.2ms**), batch-1 추론이 FLOP-bound가 아니라 dispatch-bound이기 때문입니다(MPS dispatch당 ~179µs vs CPU ~1µs; 피크 GPU 활용률의 15%) `[M]`.
+
+**7.5 — 설계의 가장 큰 두 문제가 이전 리뷰 어디에도 없고, 둘 다 그 리뷰가 도달한 모든 결론보다 중요합니다.** 부재한 그리퍼 채널과 F/T 센서의 빠진 구동 경로는 이전 분석의 정제가 아닙니다 — 이전 분석이 보지 못한 것들입니다. 이것 자체가 방법론적 발견입니다: **이전 리뷰는 *모델 구조*에 대해 추론했고 출력 벡터의 *액추에이터 커버리지*를 감사한 적이 없습니다.**
+
+**7.6 — 근거가 전혀 판정하지 못하는 것들.**
+- **팔 명령 인터페이스**(토크/impedance vs 관절 위치 전용)는 미명시이고 올바른 아키텍처를 질적으로 바꿉니다. 여기의 무엇도 이를 해소하지 않습니다. *(이후 REV.2에서 위치 전용으로 확정)*
+- **텔레옵 리그가 bilateral인지.** 결정적이고, 미지이며, 오후 반나절이면 확인 가능합니다.
+- **"양손"이 평행 조인지 다지 핸드인지.** 그리퍼 수정을 2차원에서 24–44차원으로 바꿉니다. *(이후 REV.2에서 G1 기본 구성은 측당 1-DoF continuous aperture로 확정 — 단 좌우 구성은 출처 모순)*
+- **헤드가 구동되는지, 토르소가 움직이는지.** §3.4 판정 전체가 여기에 조건부입니다. 강체 고정 헤드 → 그려진 그대로 OC-VLA 최적 설계. 살아 있는 목 → 조용히 편향됨. 움직이는 토르소 → 헤드 관절만으로 불충분. *(이후 REV.2에서: 목 2-DoF 구동, 틸트 40.6°뿐이라 토르소 상시 이동으로 확정)*
+- **이 작업들 동안 손이 헤드 이미지에 얼마나 자주 보이는지.** 이 단일 수치가 self-calibration 채널이 쓸 만한지 죽었는지를 결정합니다. 기존 텔레옵 로그에서 직접 측정 가능합니다(FK로 양손을 헤드 카메라에 투영, task phase별 FOV 내 비가림 프레임 카운트).
+- **이 프로젝트가 실제로 필요로 하는 비교를 돌린 논문이 없습니다** — 학습된 `(포즈, 관절, wrench) → 관절` vs 해석적 IK + admittance + 탐색 primitive, 같은 작업과 같은 하드웨어에서. Force Policy는 고전 baseline을 아예 생략했고, TER-DAgger에는 impedance-only baseline이 없습니다. **그 공백 자체가, 추론으로 때우지 말고 사내에서 직접 돌려야 한다는 논거입니다.**
