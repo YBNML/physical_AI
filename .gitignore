@@ -29,3 +29,4 @@ wandb/
 # 측정 결과 (기기별)
 gate1_results*.json
 results_*.json
+__pycache__/
