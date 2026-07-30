@@ -30,3 +30,6 @@ wandb/
 gate1_results*.json
 results_*.json
 __pycache__/
+experiments/e0/results/
+experiments/e0/runs*/
+*.parquet
