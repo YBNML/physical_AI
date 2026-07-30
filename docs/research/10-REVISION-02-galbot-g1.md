@@ -1,396 +1,411 @@
-I independently verified the load-bearing facts rather than relying on the research summary. Everything marked **[VERIFIED HERE]** I established today by parsing Galbot's official Apache-2.0 `galbot_one_golf_description` URDF and by running the official MJCF in MuJoCo on this M4 Mac mini.
+> 리서치 요약을 그대로 신뢰하지 않고 핵심 사실을 직접 검증했습니다. **[직접 검증]** 으로 표시된 것은 Galbot 공식 Apache-2.0 `galbot_one_golf_description` URDF를 파싱하고, 공식 MJCF를 이 M4 Mac mini에서 MuJoCo로 실행해 확인한 내용입니다.
+>
+> *(원문 영어 · 국문 번역본. 인용문은 원문을 병기했습니다.)*
 
 ---
 
-# Galbot G1 — Design Questions Resolved Against the Real Robot
+# Galbot G1 — 설계 질문을 실제 로봇에 대조해 해소
 
-## 0. What I verified myself (not taken on trust)
+## 0. 직접 검증한 것 (전해 들은 것이 아님)
 
-I cloned `github.com/GalaxyGeneralRobotics/galbot_one_golf_description` (official Galbot GitHub org, Apache-2.0) and parsed `urdf/galbot_one_golf.urdf` directly. "Galbot One Golf" is the G1. Local artifacts: `/private/tmp/claude-501/-Users-khj-YBNML-macmini-physical-AI/000857d0-9f55-4208-9ae8-2ba918f3b08a/scratchpad/g1desc/`
+`github.com/GalaxyGeneralRobotics/galbot_one_golf_description`(Galbot 공식 GitHub 조직, Apache-2.0)를 클론해 `urdf/galbot_one_golf.urdf`를 직접 파싱했습니다. **"Galbot One Golf"가 곧 G1입니다.**
 
-This resolved **five items the platform research explicitly listed as unverified**, including the single most important one (the link tree). It also **falsifies one thing the research assumed**.
+이로써 **플랫폼 리서치가 미확인으로 명시했던 항목 5개**가 해소됐고, 그중 가장 중요한 것(링크 트리)이 포함됩니다. 그리고 **리서치가 가정했던 것 하나를 반증합니다.**
 
 ---
 
-## Q1 — Arm command interface: **POSITION-ONLY. Confirmed.**
+## Q1 — 팔 명령 인터페이스: **위치 전용(POSITION-ONLY). 확정.**
 
-The official GalbotSDK C++/Python API reference says verbatim, for both `set_joint_commands` and `execute_joint_trajectory`:
+공식 GalbotSDK C++/Python API 레퍼런스가 `set_joint_commands`와 `execute_joint_trajectory` 양쪽에 대해 축자로 이렇게 씁니다:
 
 > "For standard joints (head, legs, arms), only `JointCommand::position` is effective in current versions; velocity, acceleration, and effort are currently ignored."
+>
+> *(표준 관절(헤드·다리·팔)에 대해 현재 버전에서는 `JointCommand::position`만 유효하며, velocity·acceleration·effort는 무시됩니다.)*
 
-The `JointCommand` struct *carries* `position, velocity, acceleration, effort (N·m), Kp, Kd` — the plumbing for impedance control is visibly there — but for the arms every field except `position` is discarded. There is no impedance mode, no variable-stiffness mode, no Cartesian wrench channel. `set_end_effector_command()` takes poses and frames only; no stiffness argument.
+`JointCommand` 구조체는 `position, velocity, acceleration, effort(N·m), Kp, Kd`를 **담고** 있습니다 — 임피던스 제어용 배관은 눈에 보이게 있습니다 — 그러나 팔에 대해서는 `position`을 제외한 모든 필드가 버려집니다. **임피던스 모드도, 가변 강성 모드도, Cartesian 렌치 채널도 없습니다.** `set_end_effector_command()`는 포즈와 프레임만 받고 강성 인자가 없습니다.
 
-**One exception, and it matters:** "For gripper joints, the position field represents gripper width and both velocity and effort fields are supported and effective." Force-limited grasping *is* available — but only at the gripper.
+**예외가 하나 있고, 이것이 중요합니다:** "For gripper joints, the position field represents gripper width and both velocity and effort fields are supported and effective." *(그리퍼 관절에서는 position 필드가 그리퍼 폭을 의미하며, velocity와 effort 필드가 모두 지원되고 유효합니다.)* → **힘 제한 파지는 가능합니다** — 단 그리퍼에서만.
 
-### Consequence for the design
+### 설계에 주는 결과
 
-**Reframe Model 2 honestly. It is not a cerebellum.** It cannot modulate torque, stiffness, or damping. Everything the biological metaphor implies about compliance is unreachable through this interface. Since Model 2's actuation channel is byte-for-byte identical to what an IK solver would use, its value must come entirely from *choosing better joint targets* — not from a different kind of command.
+**Model 2를 정직하게 재정의하십시오. 그것은 소뇌가 아닙니다.** 토크·강성·감쇠를 조절할 수 없습니다. 생물학적 비유가 컴플라이언스에 대해 함축하는 모든 것이 이 인터페이스로는 도달 불가입니다. Model 2의 구동 채널이 IK 솔버가 쓸 것과 바이트 단위로 동일하므로, **그 가치는 전적으로 "더 나은 관절 목표를 고르는 것"에서 나와야 합니다** — 다른 종류의 명령에서 나오는 게 아닙니다.
 
-**What a learned low level can genuinely do that analytic IK cannot, on this specific robot:**
+**이 로봇에서 학습된 저수준 계층이 해석적 IK가 못 하는 일로 진짜 할 수 있는 것:**
 
-1. **Vision-conditioned obstacle avoidance.** This is the strongest one and it is a documented hole. `GalbotMotion` states plainly: *"galbotMotion does not have real-time obstacle perception. When `enable_collision_check=true`, collision checking is evaluated against self-collision and the Motion-side environment objects that the user loads manually via `add_obstacle()`."* And: *"integrating real-time perception into galbotMotion is a planned future feature and has limited internal validation."* A policy that implicitly avoids what it sees beats the shipped planner. This is defensible.
-2. **Learned redundancy resolution** — see Q2. The null-space posture in human teleop is task- and clutter-dependent in ways a fixed IK cost function is not.
-3. **Bimanual coordination and mutual-arm collision** across the 417 mm shoulder separation **[VERIFIED HERE]**.
-4. **Admittance behavior** — F/T in, position-target offset out. This is real but *bandwidth-limited by the loop rate*, which is undocumented (see week-1 measurement).
+1. **비전 조건부 장애물 회피.** 가장 강력하고, 문서화된 구멍입니다. `GalbotMotion`이 명시합니다: *"galbotMotion does not have real-time obstacle perception. When `enable_collision_check=true`, collision checking is evaluated against self-collision and the Motion-side environment objects that the user loads manually via `add_obstacle()`."* 그리고: *"integrating real-time perception into galbotMotion is a planned future feature and has limited internal validation."* **보이는 것을 암묵적으로 회피하는 정책은 출하된 플래너를 이깁니다.** 방어 가능한 논거입니다.
+2. **학습된 중복성 해소** — Q2 참조. 사람 텔레옵에서의 영공간 자세는 고정된 IK 비용함수와 달리 작업·클러터 의존적입니다.
+3. **양팔 협응과 팔 간 상호 충돌** — 어깨 간 **417 mm** 기준 **[직접 검증]**.
+4. **어드미턴스 거동** — F/T 입력, 위치 목표 오프셋 출력. 실재하지만 **루프 레이트에 대역폭이 제한**되고, 그 레이트가 미문서화입니다(1주차 측정 항목 참조).
 
-**What it cannot do: learned compliance.** Drop that claim from the pitch.
+**할 수 없는 것: 학습된 컴플라이언스. 이 주장을 피칭에서 빼십시오.**
 
-**Unverified lead worth one email to Galbot engineering:** the SDK exposes `LEFT_ARM_PVT_BYPASS_CTRL` / `RIGHT_ARM_PVT_BYPASS_CTRL` alongside the normal `*_PVT_CTRL` controllers. "PVT" = Position-Velocity-Torque. Zero documentation exists on what "bypass" bypasses. Likewise the raw `publish_target(SingoriXTarget)` path is described as the lowest-level channel and its fields are not enumerated publicly. If either forwards effort or Kp/Kd, the entire compliance-oriented version of Model 2 becomes viable. **This is the highest-value question to ask the vendor and it is likely answerable only by a sales/FAE contact.**
+**Galbot 엔지니어링에 이메일 한 통 보낼 가치가 있는 미확인 단서:** SDK가 일반 `*_PVT_CTRL` 컨트롤러 옆에 `LEFT_ARM_PVT_BYPASS_CTRL` / `RIGHT_ARM_PVT_BYPASS_CTRL`을 노출합니다. "PVT" = Position-Velocity-Torque. **"bypass"가 무엇을 우회하는지 문서가 0건입니다.** 마찬가지로 원시 `publish_target(SingoriXTarget)` 경로가 최하위 채널로 설명되는데 필드가 공개 열거되지 않았습니다. **둘 중 하나라도 effort나 Kp/Kd를 전달한다면 컴플라이언스 지향 Model 2 전체가 되살아납니다. 벤더에 물을 가치가 가장 높은 질문이고, 아마 영업/FAE 담당을 통해서만 답을 얻을 수 있습니다.**
 
 ---
 
-## Q2 — Redundancy: 7-DoF confirmed, and the arm is a textbook S-R-S
+## Q2 — 중복성: 7-DoF 확정, 그리고 이 팔은 교과서적 S–R–S
 
-**7-DoF per arm is confirmed four independent ways** — the official spec table (手臂 7x2), the official 23-D joint vector (`left_arm_joint1..7`, `right_arm_joint1..7`), academic papers, and now the URDF itself.
+**팔당 7-DoF는 네 경로로 독립 확인됩니다** — 공식 스펙 표(手臂 7x2), 공식 23차원 관절 벡터(`left_arm_joint1..7`, `right_arm_joint1..7`), 학술 논문, 그리고 이제 URDF 자체.
 
-**[VERIFIED HERE] — new result the research did not have.** I computed the world-frame position and axis direction of all 7 left-arm joints at zero configuration and tested axis concurrency by least squares. The result is exact (residual 0.000 mm):
+**[직접 검증] — 리서치에는 없던 새 결과.** 왼팔 7개 관절 전부의 world 프레임 위치와 축 방향을 영 자세(zero configuration)에서 계산하고 최소자승으로 축 집중성(concurrency)을 검정했습니다. 결과는 정확합니다(잔차 0.000 mm):
 
-| Cluster | Joints | Common point | Structure |
+| 클러스터 | 관절 | 공통점 | 구조 |
 |---|---|---|---|
-| Shoulder | j1, j2, j3 | `[0.1069, 0.2084, 0.7257]` | **spherical, 3 axes concurrent** |
-| Elbow | j4 | `[0.1069, 0.5584, 0.7257]` | single revolute |
-| Wrist | j5, j6, j7 | `[0.1069, 0.9184, 0.7257]` | **spherical, 3 axes concurrent** |
+| 어깨 | j1, j2, j3 | `[0.1069, 0.2084, 0.7257]` | **구형(spherical), 3축 집중** |
+| 팔꿈치 | j4 | `[0.1069, 0.5584, 0.7257]` | 단일 회전 |
+| 손목 | j5, j6, j7 | `[0.1069, 0.9184, 0.7257]` | **구형(spherical), 3축 집중** |
 
-Upper arm = **0.350 m**, forearm = **0.360 m**, total **0.710 m** — matching the official 710 mm shoulder-to-wrist spec exactly.
+상완 = **0.350 m**, 전완 = **0.360 m**, 합 **0.710 m** — 공식 710 mm 어깨-손목 스펙과 정확히 일치.
 
-**The G1 arm is a canonical 7-DoF Spherical–Revolute–Spherical (S–R–S) manipulator.** This is much better news than a generic 7R.
+**G1 팔은 정준 7-DoF 구형–회전–구형(S–R–S) 매니퓰레이터입니다.** 이는 일반 7R보다 훨씬 좋은 소식입니다.
 
-### The exact fix
+### 정확한 수정
 
-A 6-DoF pose leaves a **1-dimensional self-motion manifold per arm**: with the wrist center fixed, the elbow sweeps a circle about the shoulder→wrist axis. Parameterize it with the classical **arm angle (swivel angle) ψ**:
+6-DoF 포즈는 **팔당 1차원 자기운동(self-motion) 다양체**를 남깁니다: 손목 중심을 고정하면 팔꿈치가 어깨→손목 축을 중심으로 원을 그립니다. 이를 고전적인 **팔 각도(arm angle / swivel angle) ψ** 로 파라미터화하십시오:
 
-> ψ = the signed angle of the elbow point about the shoulder→wrist axis, measured from a reference plane. Use the plane containing the shoulder→wrist line and the `torso_base_link` vertical axis as the ψ = 0 reference — torso-anchored, so it is invariant to neck motion and consistent across torso heights.
+> ψ = 어깨→손목 축을 중심으로 한 팔꿈치 점의 부호 있는 각도, 기준 평면으로부터 측정. **어깨→손목 직선과 `torso_base_link` 수직축을 포함하는 평면**을 ψ = 0 기준으로 쓰십시오 — 토르소에 고정되므로 목 운동에 불변이고 토르소 높이에 걸쳐 일관됩니다.
 
-**Concrete interface change:**
+**구체적 인터페이스 변경:**
 
-- **Model 1 output per arm: 8 numbers** — `[x, y, z, qx, qy, qz, qw, ψ]`, i.e. 16 numbers for both hands instead of 14.
-- **Labels are free.** Compute ψ from your teleop demonstrations by forward kinematics on the recorded 7 joint angles. No extra annotation, no extra hardware. The TM01 leader arm is *isomorphic* (7-DoF leader → 7-DoF follower), so the recorded ψ is genuinely the human operator's chosen posture, not an IK artifact.
-- **Because the arm is S–R–S, given `(pose, ψ)` the 7 joint angles have a closed-form analytic solution** (Shimizu et al. 2008 style), up to finitely many discrete branches. So you get an exact analytic baseline for Model 2 for free — and Model 2 now has to beat a *fully determined* analytic solver, not an underdetermined one. That is a harder but much more honest bar.
-- Enforce ψ limits from the joint limits I extracted: `j1 ±3.004, j2 ±1.608, j3 ±2.917, j4 −2.568..+1.870 (left; mirrored right), j5 ±2.917, j6 −0.823..+0.735, j7 ±1.538` rad. Efforts `60/60/30/30/10/10/10` N·m, velocity `1.5` rad/s on all seven. **[VERIFIED HERE]**
+- **Model 1 출력, 팔당 8개 숫자** — `[x, y, z, qx, qy, qz, qw, ψ]`. 즉 양손 합쳐 14개가 아니라 **16개**.
+- **라벨은 공짜입니다.** 텔레옵 데모에 기록된 7개 관절각에 순기구학을 돌려 ψ를 계산하십시오. 추가 주석도, 추가 하드웨어도 필요 없습니다. **TM01 리더 암은 등가(isomorphic)** 이므로(7-DoF 리더 → 7-DoF 팔로워), 기록된 ψ는 IK 아티팩트가 아니라 **사람 조작자가 실제로 고른 자세**입니다.
+- **팔이 S–R–S이므로 `(포즈, ψ)`가 주어지면 7개 관절각의 폐형(closed-form) 해석해가 존재합니다** (Shimizu et al. 2008 계열), 유한 개의 이산 분기까지. **따라서 Model 2를 위한 정확한 해석적 기준선이 공짜로 생기고 — Model 2는 이제 미결정 솔버가 아니라 완전 결정 솔버를 이겨야 합니다. 더 어렵지만 훨씬 정직한 기준선입니다.**
+- 추출한 관절 한계에서 ψ 범위를 강제하십시오: `j1 ±3.004, j2 ±1.608, j3 ±2.917, j4 −2.568..+1.870`(왼쪽, 오른쪽은 미러), `j5 ±2.917, j6 −0.823..+0.735, j7 ±1.538` rad. Effort는 `60/60/30/30/10/10/10` N·m, 속도는 7개 전부 `1.5` rad/s. **[직접 검증]**
 
-⚠️ The uniform 1.5 rad/s velocity limit across all seven joints looks like a placeholder, not a measured hardware limit. Treat it as unverified.
+⚠️ 7개 관절 전부에 균일한 1.5 rad/s 속도 한계는 측정된 하드웨어 한계가 아니라 **플레이스홀더로 보입니다.** 미확인으로 취급하십시오.
 
 ---
 
-## Q4 — The head-frame problem
+## Q4 — 헤드 프레임 문제
 
-### The full kinematic chain — **[VERIFIED HERE], no longer an assumption**
+### 전체 기구학 체인 — **[직접 검증], 더 이상 가정이 아님**
 
-The research flagged this as its biggest unproven assumption. I resolved it from the official URDF. The tree is:
+리서치는 이것을 자신의 가장 큰 미증명 가정으로 표시했습니다. 공식 URDF로 해소했습니다. 트리는 이렇습니다:
 
 ```
 base_footprint
  └─ base_link                    (fixed)
-     └─ omni_chassis_base_link   (fixed)   ← 3 planar DoF live BELOW here (x, y, yaw), not in the URDF
+     └─ omni_chassis_base_link   (fixed)   ← 평면 3 DoF(x, y, yaw)가 여기 아래에 존재, URDF에 없음
          └─ omni_chassis_leg_mount_link (fixed)
              └─ leg_base_link    (fixed)
                  └─ leg_joint1   REVOLUTE   [0.000 .. 0.937 rad]
-                     └─ leg_joint2  REVOLUTE [0.000 .. 2.585]   link 0.45 m
-                         └─ leg_joint3 REVOLUTE [0.000 .. 2.326] link 0.39 m
-                             └─ leg_joint4 REVOLUTE [±1.591]  ← WAIST YAW (±91°)
+                     └─ leg_joint2  REVOLUTE [0.000 .. 2.585]   링크 0.45 m
+                         └─ leg_joint3 REVOLUTE [0.000 .. 2.326] 링크 0.39 m
+                             └─ leg_joint4 REVOLUTE [±1.591]  ← 허리 요(YAW), ±91°
                                  └─ leg_joint5 REVOLUTE [±0.165]
-                                     └─ torso_base_link          ★ SINGLE RIGID TORSO LINK
-                                         ├─ (fixed) → head_base_link → head_joint1 PAN → head_joint2 TILT → head_link2
+                                     └─ torso_base_link          ★ 단일 강체 토르소 링크
+                                         ├─ (fixed) → head_base_link → head_joint1 팬 → head_joint2 틸트 → head_link2
                                          ├─ (fixed, xyz +0.208 +0.172) → left_arm_base_link
                                          └─ (fixed, xyz −0.208 +0.172) → right_arm_base_link
 ```
 
-**Three findings that change the analysis:**
+**분석을 바꾸는 세 가지 발견:**
 
-1. **The neck and BOTH shoulders descend from one rigid `torso_base_link` via FIXED joints.** All 5 leg/waist joints — including the ±91° waist yaw — sit strictly *below* it. The research's central assumption is **confirmed**, not assumed. This is the good news.
-2. **The 5 "leg" joints are REVOLUTE, not prismatic.** It is a 5-link folding column (0.45 m + 0.39 m segments), not a telescoping lift. The research listed this as unverified; it is now settled. `leg_joint4` is the waist yaw and it is large (±91°).
-3. **Neck ROM, previously unpublished anywhere:** `head_joint1` pan **±1.5208 rad = ±87.1°**; `head_joint2` tilt **−0.2143 .. +0.4936 rad = −12.3° .. +28.3°**. **The tilt range is only 40.6° total.** This has a consequence nobody has noted: *the G1 physically cannot look far down at a table by tilting its head.* To see a work surface it must fold its legs and lower the torso. **So the torso WILL move during manipulation — constantly.** Hold that thought.
+1. **목과 양쪽 어깨가 하나의 강체 `torso_base_link`에서 FIXED 조인트로 갈라집니다.** 5개 다리/허리 관절 전부 — ±91° 허리 요를 포함해 — 가 엄격히 그 **아래**에 있습니다. 리서치의 핵심 가정이 **가정이 아니라 확정**됐습니다. 이것이 좋은 소식입니다.
+2. **5개 "다리" 관절은 REVOLUTE이고 PRISMATIC이 아닙니다.** 신축식 리프트가 아니라 5링크 접이식 컬럼(0.45 m + 0.39 m 세그먼트)입니다. 리서치가 미확인으로 남긴 항목이고 이제 해결됐습니다. `leg_joint4`가 허리 요이고 **큽니다(±91°)**.
+3. **목 가동범위, 이전까지 어디에도 공개되지 않은 값:** `head_joint1` 팬 **±1.5208 rad = ±87.1°**, `head_joint2` 틸트 **−0.2143 .. +0.4936 rad = −12.3° .. +28.3°**. **틸트 범위가 총 40.6°뿐입니다.** 아무도 지적하지 않은 결과가 여기서 나옵니다: **G1은 머리를 틸트해서 테이블을 아래로 멀리 내려다보는 것이 물리적으로 불가능합니다.** 작업면을 보려면 다리를 접어 토르소를 낮춰야 합니다. **따라서 조작 중 토르소는 — 상시 — 움직입니다.** 이 점을 기억하십시오.
 
-### How many DoF of head→arm-base are NOT recoverable from the 14 arm joints?
+### head→arm-base 중 팔 관절 14개로 복구되지 않는 DoF는 몇 개인가?
 
-**Exactly 2:** `head_joint1` (pan) and `head_joint2` (tilt). Nothing else.
+**정확히 2개:** `head_joint1`(팬)과 `head_joint2`(틸트). 그 외에는 없습니다.
 
-Because the 5 leg/waist joints and the 3 planar base DoF are **common ancestors** of both the neck branch and both arm branches, they cancel algebraically out of the *relative* head→arm-base transform. Verified geometrically: I computed the transform at multiple leg configurations and it is invariant.
+5개 다리/허리 관절과 3개 평면 베이스 DoF는 목 브랜치와 양쪽 팔 브랜치 **모두의 공통 조상**이므로, *상대* head→arm-base 변환에서 **대수적으로 소거**됩니다. 기하학적으로 검증했습니다: 여러 다리 구성에서 변환을 계산했고 불변입니다.
 
-But those 2 joints are not a small 2-D corner of SE(3). The head pivot sits **0.205 m above and 0.208 m lateral** of the shoulder, so pan and tilt move the shoulder on a lever arm: **all 3 translation components and 2 of 3 rotation components** of the 6-DoF transform vary. Roughly 5 of 6 pose components move, and **none are recoverable from arm joints alone.**
+그러나 그 2개 관절은 SE(3)의 작은 2차원 구석이 아닙니다. 목 피벗이 어깨보다 **0.205 m 위, 0.208 m 옆**에 있어 팬과 틸트가 지렛대로 어깨를 움직입니다: 6-DoF 변환의 **병진 3성분 전부와 회전 3성분 중 2개**가 변합니다. 대략 **6개 포즈 성분 중 5개가 움직이고, 팔 관절만으로는 하나도 복구되지 않습니다.**
 
-Model 2's proposed input (Model 1 output + head image + wrist F/T + 14 arm joints) is **structurally missing exactly 2 scalars** required to make the head→joint mapping well-posed.
+Model 2의 제안된 입력(Model 1 출력 + 헤드 이미지 + 손목 F/T + 팔 관절 14개)은 head→관절 매핑을 well-posed하게 만드는 데 필요한 **스칼라 2개가 구조적으로 빠져 있습니다.**
 
-### Error magnitude at realistic motion — **[COMPUTED HERE from the real URDF]**
+### 현실적 운동에서의 오차 크기 — **[실제 URDF에서 직접 계산]**
 
-Sensitivity of the head→left-shoulder transform to neck motion:
+head→왼쪽 어깨 변환의 목 운동에 대한 민감도:
 
-| Neck error | Shoulder translation shift | Shoulder rotation shift |
+| 목 오차 | 어깨 병진 이동 | 어깨 회전 이동 |
 |---|---|---|
 | 1° | 3.6 mm | 1.00° |
 | 5° | 18.2 mm | 5.00° |
 | 10° | 36.3 mm | 10.00° |
 
-End-to-end target error, for a target expressed in head frame and consumed in shoulder frame with a stale/unknown neck angle:
+헤드 프레임으로 표현된 목표를 어깨 프레임에서 소비할 때, 목 각도가 stale하거나 미지일 경우의 종단간 목표 오차:
 
-| Reach distance | 1° neck error | 2° | 5° | 10° |
+| 도달거리 | 목 오차 1° | 2° | 5° | 10° |
 |---|---|---|---|---|
 | 0.4 m | 7.0 mm | 14.0 mm | 34.9 mm | 69.7 mm |
-| **0.6 m (typical)** | **10.5 mm** | **20.9 mm** | **52.3 mm** | **104.6 mm** |
+| **0.6 m (전형)** | **10.5 mm** | **20.9 mm** | **52.3 mm** | **104.6 mm** |
 | 0.8 m | 14.0 mm | 27.9 mm | 69.8 mm | 139.4 mm |
 
-**Rule of thumb: ≈10 mm of target error per degree of neck error, at 0.6 m reach.**
+> **경험칙: 0.6 m 도달거리에서 목 오차 1도당 목표 오차 ≈10 mm.**
 
-Translating to realistic motion:
+현실적 운동으로 환산하면:
 
-- **Neck pan at 30 °/s, one 30 Hz frame of staleness (33 ms):** 1.0° → **~10 mm**. Marginal but survivable for grasping a mug; fatal for insertion.
-- **Neck pan at 60 °/s, 100 ms end-to-end latency** (plausible for an off-board Mac over Ethernet): 6° → **~63 mm**. Complete miss.
-- **Neck pan at 30 °/s over a 500 ms action chunk:** 15° → **~157 mm**. Catastrophic.
+- **목 팬 30 °/s, 30 Hz 한 프레임(33 ms) staleness:** 1.0° → **~10 mm.** 머그컵 파지에는 빠듯하게 생존, **삽입에는 치명적.**
+- **목 팬 60 °/s, 종단간 100 ms 지연**(외부 Mac에서 이더넷 경유 시 타당한 값): 6° → **~63 mm. 완전 실패.**
+- **목 팬 30 °/s, 500 ms 액션 청크 동안:** 15° → **~157 mm. 파국.**
 
-**This is not hypothetical.** Galbot's own converter sets `action[t] = state[t+1]` over all 23 dims, and `generate_modality_json()` lists all 23 as action names — so **in the vendor's own reference teleop recordings the neck is a commanded action dimension that moves within episodes.** The "head is fixed once positioned" assumption is refuted by vendor code.
+**이것은 가설이 아닙니다.** Galbot 자체 컨버터가 `action[t] = state[t+1]`을 23차원 전부에 대해 설정하고, `generate_modality_json()`이 23개를 전부 action name으로 열거합니다 — 즉 **벤더 자신의 레퍼런스 텔레옵 기록에서 목이 에피소드 내부에서 움직이는 명령 차원입니다.** "헤드는 한 번 위치시키면 고정"이라는 가정은 **벤더 코드가 반증합니다.**
 
-### Now the much bigger number
+### 그리고 훨씬 더 큰 숫자
 
-Everything above is for a **body-relative** target. For an **environment-anchored** target — the actual case for any manipulation where the object sits on a table while the robot repositions — the unobservable count **jumps from 2 to 10**: 2 neck + 5 leg/waist + 3 planar base. None appear in the 14 arm joints, and **there is no base odometry channel anywhere in the 23-D state vector or in the official converter's topic list.**
+위의 모든 것은 **몸 기준(body-relative)** 목표에 대한 것입니다. **환경 고정(environment-anchored)** 목표 — 로봇이 자세를 바꾸는 동안 물체가 테이블에 있는, 모든 조작의 실제 사례 — 에서는 미관측 개수가 **2개에서 10개로 뜁니다**: 목 2 + 다리/허리 5 + 평면 베이스 3. 어느 것도 팔 관절 14개에 나타나지 않고, **23차원 상태 벡터에도 공식 컨버터의 토픽 목록에도 베이스 오도메트리 채널이 없습니다.**
 
-The error here is **unattenuated, 1:1**:
+이쪽 오차는 **감쇠 없이 1:1**입니다:
 
-- **Torso lift of 10 cm** during a reach → **100 mm** of target error. And recall finding (3): with only 40.6° of neck tilt, torso motion during manipulation is *mandatory*, not optional. The full travel is 650 mm.
-- **Base drift of 2 cm** (omnidirectional wheel creep, or a deliberate reposition) → **20 mm**, invisible to the model.
-- **Waist yaw** (±91°) → tens of centimeters.
+- **도달 중 토르소 10 cm 이동** → 목표 오차 **100 mm.** 그리고 발견 (3)을 상기하십시오: 목 틸트가 40.6°뿐이라 조작 중 토르소 운동은 선택이 아니라 **필수**입니다. 전체 이동량은 650 mm입니다.
+- **베이스 드리프트 2 cm**(옴니휠 크리프 또는 의도적 재배치) → **20 mm**, 모델에는 보이지 않음.
+- **허리 요**(±91°) → 수십 cm.
 
-### The fix, ranked by cost
+### 수정, 비용순
 
-**(b) Convert head-frame → arm-base frame at the interface, using capture-time state — DO THIS. Cheapest, most correct.**
-At the moment Model 1 produces a target, compose it with the live `head_joint1/2` values sampled from the *same* synchronized observation, and hand Model 2 a target in `torso_base_link` (or `base_link`) frame. Cost: two joint reads and one 4×4 multiply, using a transform I have already computed from the public URDF. It kills the moving-frame problem *and* the environment-anchored problem in one move, because the arm-base frame is by construction invariant to neck motion, and re-anchoring each step handles torso/base motion. This is what NVIDIA's official Isaac Lab Galbot task does — every observation there is `*_in_base_frame` rooted at `base_link`. It is also what Galbot's own GraspVLA does: it predicts grasp pose **in the robot base frame**. The SDK's `set_end_effector_command` defaults to `world` frame. **Nothing in the entire ecosystem works in head-image frame. You would be the only one.**
+**(b) 촬영시각 상태를 써서 인터페이스에서 head 프레임 → arm-base 프레임으로 변환 — 이것을 하십시오. 가장 싸고 가장 올바릅니다.**
 
-**(a) Add the missing joint states to Model 2's input — do this too, it is nearly free.**
-Widen Model 2's state input from 14 → 21: 14 arm + 2 head + 5 leg/waist. All seven extra values are already in the 23-D dataset at zero marginal cost. Even after (b) removes the geometric need for the head joints, the **5 leg/waist joints remain valuable as posture/reachability context** — the natural null-space posture ψ in your demonstrations will correlate strongly with torso height across the 650 mm range, and the policy cannot learn that correlation from variables it cannot see. Do (a) *and* (b); they are complementary, not alternatives.
+Model 1이 목표를 산출하는 순간, **같은 동기화 관측**에서 샘플링한 실시간 `head_joint1/2` 값과 합성해 Model 2에게 `torso_base_link`(또는 `base_link`) 프레임의 목표를 넘기십시오. 비용: 관절 2개 읽기와 4×4 곱셈 1회, 그것도 이미 공개 URDF에서 계산해둔 변환으로. **이동 프레임 문제와 환경 고정 문제를 한 번에 죽입니다** — arm-base 프레임은 구조상 목 운동에 불변이고, 매 스텝 재고정(re-anchoring)이 토르소·베이스 운동을 처리하기 때문입니다.
 
-**(c) Freeze the neck/torso/base in v1 — do NOT rely on this.**
-Two problems. First, **I could not verify that the SDK exposes a "freeze head" mode at all** — it is not in the public quick-start manual or SDK overview, and the `HEAD_PVT_CTRL` controller lifecycle functions do not document a hold/lock semantic. You would need to hold position by continuously commanding the current head angle, which is not the same as locking. Second, and worse, **the 40.6° tilt limit means a frozen head cannot see a table without a specific torso pose** — so freezing the neck forces you to also freeze the torso, which forces one fixed working height out of a 650 mm range. You would be discarding most of the robot's workspace to avoid a two-number interface change. Not worth it. *Useful only as a controlled A/B to isolate the frame error during debugging.*
+이것이 NVIDIA 공식 Isaac Lab Galbot 태스크가 하는 방식입니다 — 거기서 모든 관측은 `base_link`에 뿌리를 둔 `*_in_base_frame`입니다. Galbot 자신의 GraspVLA도 그렇습니다: 파지 포즈를 **로봇 베이스 프레임**에서 예측합니다. SDK의 `set_end_effector_command`는 기본이 `world` 프레임입니다. **생태계 전체에서 헤드 이미지 프레임으로 작동하는 것은 하나도 없습니다. 당신만 그렇게 하는 셈이 됩니다.**
 
-**(d) Predict directly in arm-base frame — this is the right long-term answer and it is what (b) converges to.**
-The distinction between (b) and (d) is only *where* the transform happens. (b) keeps Model 1's internal representation head-centric and converts at the boundary; (d) trains Model 1 to emit base-frame poses directly. Start with (b) because it is a wrapper you can add today without retraining. Move to (d) once you have data, because it removes the transform from the latency path entirely and matches every dataset (RoboCOIN's `eef_sim_pose_state`/`eef_sim_pose_action` are in a robot frame, not head frame) and every vendor API you will ever call.
+**(a) 빠진 관절 상태를 Model 2 입력에 추가 — 이것도 하십시오. 거의 무료입니다.**
 
-### One more head-frame tax you have not costed
+Model 2의 상태 입력을 14 → 21로 넓히십시오: 팔 14 + 헤드 2 + 다리/허리 5. 추가되는 7개 값 전부가 이미 23차원 데이터셋에 있어 한계 비용이 0입니다. (b)가 헤드 관절의 기하학적 필요를 제거한 뒤에도, **다리/허리 5개는 자세·도달가능성 맥락으로서 여전히 가치가 있습니다** — 데모에서의 자연스러운 영공간 자세 ψ는 650 mm 범위에 걸쳐 토르소 높이와 강하게 상관될 것이고, **정책은 볼 수 없는 변수와의 상관을 학습할 수 없습니다.** (a)와 (b)를 **둘 다** 하십시오. 대안이 아니라 상보적입니다.
 
-**[VERIFIED HERE] There is no head camera in the official robot description.** I grepped `urdf/`, `xacro/`, `mjcf/`, and `config/`: the only camera links that exist are `left_wrist_camera_link` and `right_wrist_camera_link`. There is a `head_end_effector_mount_link` (an empty frame on `head_link2`) but **no camera link, no optical frame, no intrinsics, and no stereo baseline.** The MJCF contains **0 `<camera>` elements and 0 `<site>` elements**.
+**(c) v1에서 목/토르소/베이스를 고정 — 이것에 의존하지 마십시오.**
 
-So the head-camera-to-`head_link2` extrinsic — the single most load-bearing number in a head-frame architecture — is **not published anywhere**. You must obtain it from Galbot or measure it by hand-eye calibration on real hardware. `get_camera_intrinsic()` returns intrinsics at runtime from the robot, but that is a real-robot call; it does not help you in sim, and I found no documented extrinsic accessor.
+문제가 둘입니다. 첫째, **SDK가 "헤드 고정" 모드를 노출하는지 자체를 확인할 수 없었습니다** — 공개 퀵스타트 매뉴얼이나 SDK 개요에 없고, `HEAD_PVT_CTRL` 컨트롤러 생애주기 함수에 hold/lock 의미가 문서화돼 있지 않습니다. 현재 헤드 각도를 계속 명령해 자세를 유지해야 할 텐데, 그건 락(lock)과 같지 않습니다. 둘째, 더 나쁘게는, **40.6° 틸트 한계 때문에 고정된 헤드로는 특정 토르소 자세 없이 테이블을 볼 수 없습니다** — 즉 목을 고정하면 토르소도 고정해야 하고, 그러면 650 mm 범위 중 하나의 고정 작업 높이만 남습니다. **숫자 2개짜리 인터페이스 변경을 피하려고 로봇 작업공간 대부분을 버리는 것입니다. 그럴 가치가 없습니다.** *디버깅 중 프레임 오차를 분리하기 위한 통제된 A/B로만 유용합니다.*
 
-**Also: the head has no depth sensor.** The spec says 双目相机x1 (one binocular/stereo camera) and the SDK `SensorType` enum has exactly `HEAD_LEFT_CAMERA` and `HEAD_RIGHT_CAMERA`, both RGB. There is no head depth enum. Metric depth from the head requires running `FOUNDATION_STEREO` or `LIGHT_STEREO` — *learned* stereo models — which is a GPU inference cost competing with your policy for the same Orin. Meanwhile the **wrist** cameras are genuine RGB-D (RealSense D405-class per the xacro, with real depth). Note the source conflict: the MobileH2R paper calls the G1 head "a head depth camera," contradicting the manual. **Verify on your unit.**
+**(d) arm-base 프레임으로 직접 예측 — 장기적으로 올바른 답이고, (b)가 수렴하는 지점입니다.**
 
-Net: head-image frame costs you an unpublished extrinsic, a learned-stereo depth pipeline, a moving reference frame, and divergence from every dataset and API in the ecosystem. **Stop paying the head-frame tax.**
+(b)와 (d)의 차이는 **변환이 어디서 일어나는가**뿐입니다. (b)는 Model 1의 내부 표현을 헤드 중심으로 유지하고 경계에서 변환합니다. (d)는 Model 1이 베이스 프레임 포즈를 직접 내도록 학습시킵니다. **(b)로 시작하십시오** — 재학습 없이 오늘 추가할 수 있는 래퍼이기 때문입니다. **데이터가 모이면 (d)로 옮기십시오** — 변환을 지연 경로에서 완전히 제거하고, 앞으로 호출할 모든 데이터셋(RoboCOIN의 `eef_sim_pose_state`/`eef_sim_pose_action`은 헤드 프레임이 아니라 로봇 프레임입니다)과 모든 벤더 API에 맞기 때문입니다.
 
----
+### 아직 계산하지 않은 헤드 프레임 세금이 하나 더 있습니다
 
-## Gripper — absent from the diagram, and that is a task-critical omission
+**[직접 검증] 공식 로봇 기술서에 헤드 카메라가 없습니다.** `urdf/`, `xacro/`, `mjcf/`, `config/`를 grep했습니다: 존재하는 카메라 링크는 `left_wrist_camera_link`와 `right_wrist_camera_link`뿐입니다. `head_end_effector_mount_link`(`head_link2` 위의 빈 프레임)는 있지만 **카메라 링크도, 광학 프레임도, intrinsic도, 스테레오 베이스라인도 없습니다.** MJCF에는 `<camera>` 요소 **0개**, `<site>` 요소 **0개**.
 
-**What the G1's end effector actually is:** In the shipped `G1_V2.2B` configuration, **1 DoF per side with continuous aperture**. Galbot's converter divides the raw value by 1000 to yield **gripper width in metres** — a regression target, *not* a binary open/close flag. **[VERIFIED HERE]** in the URDF: `left_gripper_joint` / `right_gripper_joint`, range `0 .. 1.703 rad`, effort 50 N·m, velocity 0.5 rad/s, driving 5 mimic joints per side (parallel-jaw linkage), TCP at `left_gripper_tcp_link` 0.14 m out. Both arms carry parallel grippers in the default preset, and the MJCF has 23 position actuators including both grippers.
+즉 헤드카메라 → `head_link2` 외부 파라미터 — **헤드 프레임 아키텍처에서 가장 핵심적인 단일 수치** — 가 **어디에도 공개되지 않았습니다.** Galbot에서 받거나 실기체에서 손-눈 캘리브레이션으로 직접 측정해야 합니다. `get_camera_intrinsic()`이 런타임에 로봇에서 intrinsic을 반환하지만 그건 실기체 호출이라 시뮬에서는 도움이 안 되고, 문서화된 외부 파라미터 접근자를 찾지 못했습니다.
 
-⚠️ **The end-effector configuration is contradictory across sources and you must confirm it in writing before purchase.** `xacro/robot.xacro` exposes `left_ee_type` and `right_ee_type` as **independent** arguments **[VERIFIED HERE]**, and the repo ships a doc image literally named `galbot_one_golf_left_hitbot_gripper_right_suction_cup_urdf.png`. Meanwhile: Chinese product copy says **left suction + right adaptive gripper**; NVIDIA Isaac Lab's `galbot_one_charlie` asset says **left parallel gripper + right suction cup**; the `G1_V2.2B` joint vector names **both sides "gripper."** These cannot all describe the same machine. **If your unit ships with a suction cup on one arm, half your action space is a vacuum toggle rather than a graspable hand, and true bimanual coordination — the entire premise — becomes impossible.** Specify dual grippers explicitly in the purchase order.
+**그리고 헤드에는 깊이 센서가 없습니다.** 스펙은 双目相机x1(양안/스테레오 카메라 1개)이라 하고, SDK `SensorType` enum에는 정확히 `HEAD_LEFT_CAMERA`와 `HEAD_RIGHT_CAMERA`가 있으며 **둘 다 RGB**입니다. 헤드 깊이 enum은 없습니다. 헤드에서 미터 스케일 깊이를 얻으려면 `FOUNDATION_STEREO` 또는 `LIGHT_STEREO` — **학습 기반** 스테레오 모델 — 를 돌려야 하고, 이는 **정책과 같은 Orin을 놓고 경쟁하는 GPU 추론 비용**입니다. 반면 **손목** 카메라는 진짜 RGB-D입니다(xacro 기준 RealSense D405급, 실제 깊이 있음). 출처 충돌에 주의: MobileH2R 논문은 G1 헤드를 "a head depth camera"라 부르며 매뉴얼과 모순됩니다. **당신 유닛에서 확인하십시오.**
 
-### Where the gripper command must enter the pipeline
-
-**Model 2's output, as a continuous width. Expand Model 2 from 14-D to 16-D.**
-
-Reasoning:
-
-- It **cannot** enter at Model 1 as part of a pose. A 6-DoF pose has no aperture dimension. If you want Model 1 to have a say, it should emit a *discrete grasp phase* (approach / close / lift / release), not a width.
-- It **must** be Model 2's output because grasp timing is contact-conditioned, and Model 2 is the only model that sees wrist F/T. Closing the gripper at the right instant is exactly the decision that force feedback informs. This is also the one place where your F/T input has a *direct actuation consequence* rather than merely nudging a position target.
-- **Training a 14-D policy on data collected through the official pipeline silently discards 9 of 23 action dimensions — including grasp open/close.** Your policy would be structurally unable to pick anything up.
-
-**Two capabilities the diagram is throwing away:**
-
-1. **The gripper is the ONE joint where velocity and effort commands actually work** (SDK, verbatim: *"For gripper joints, the position field represents gripper width and both velocity and effort fields are supported and effective"*). So **force-limited grasping is available on this robot right now**, even though arm-level compliance is not. For deformable or fragile objects this is significant, and it partly rescues the force-aware story.
-2. If your unit has a suction cup, the command is `set_suction_cup_command` and the feedback is `SuctionCupState` with **pressure in Pascals** (negative for suction) plus success/fail states — a genuinely useful contact/grasp-confirmation signal, and a completely different action space that your model must be architected for from day one.
-
-**Unit conversion warning:** the URDF drives the gripper in radians (0..1.703) while the SDK and dataset use metres of width. You must own that mapping. It is not documented; measure it.
+정리하면, 헤드 이미지 프레임은 **미공개 외부 파라미터 + 학습 스테레오 깊이 파이프라인 + 이동하는 기준 프레임 + 생태계의 모든 데이터셋·API와의 불일치**를 대가로 요구합니다. **헤드 프레임 세금을 그만 내십시오.**
 
 ---
 
-## Wrist F/T — **YES, it is standard hardware. Your key dependency holds.**
+## 그리퍼 — 다이어그램에 없고, 그것은 작업에 치명적인 누락입니다
 
-Confirmed three independent ways:
+**G1 엔드이펙터의 실제 정체:** 출하되는 `G1_V2.2B` 구성에서 **측당 1 DoF, 연속 개폐(continuous aperture)**. Galbot 컨버터가 원시 값을 1000으로 나눠 **미터 단위 그리퍼 폭**을 만듭니다 — 이진 개폐 플래그가 아니라 **회귀 타깃**입니다. **[직접 검증]** URDF에서: `left_gripper_joint` / `right_gripper_joint`, 범위 `0 .. 1.703` rad, effort 50 N·m, 속도 0.5 rad/s, 측당 mimic 관절 5개(평행 조 링키지) 구동, TCP는 `left_gripper_tcp_link`에서 0.14 m 전방. 기본 프리셋에서는 양팔 모두 평행 그리퍼를 달고, MJCF에는 양쪽 그리퍼를 포함해 위치 액추에이터 23개가 있습니다.
 
-1. **Official hardware spec table:** 腕部（左右合计）深度相机x2，**腕部六维力传感器x2** — 2 wrist six-axis force/torque sensors, listed **without an "optional" marker**.
-2. **First-class SDK API:** `robot.get_force_sensor_data(GalbotOneFoxtrotSensor.LEFT_WRIST_FORCE / RIGHT_WRIST_FORCE)` returning a `ForceData` struct with `force.x/y/z` in **Newtons**, `torque.x/y/z` in **N·m**, and `timestamp_ns`.
-3. **A dedicated example program** ships in the SDK: `get_force_sensor_data_example.cpp` / `.py`.
+⚠️ **엔드이펙터 구성이 출처마다 모순되며, 구매 전에 서면으로 확인해야 합니다.** `xacro/robot.xacro`가 `left_ee_type`과 `right_ee_type`를 **독립 인자**로 노출하고 **[직접 검증]**, 레포에 문자 그대로 `galbot_one_golf_left_hitbot_gripper_right_suction_cup_urdf.png` 라는 이름의 문서 이미지가 있습니다. 한편: 중국어 제품 설명은 **좌 석션 + 우 적응형 그리퍼**, NVIDIA Isaac Lab의 `galbot_one_charlie` 자산은 **좌 평행 그리퍼 + 우 석션컵**, `G1_V2.2B` 관절 벡터는 **양쪽 다 "gripper"** 라고 합니다. **이들이 모두 같은 기계를 설명할 수는 없습니다.**
 
-This was the stated make-or-break unknown and the answer is unambiguously yes.
+> **당신 유닛이 한쪽 팔에 석션컵을 달고 출하되면, 액션 공간의 절반이 잡을 수 있는 손이 아니라 진공 토글이 되고, 진짜 양팔 협응 — 이 프로젝트의 전제 전체 — 이 불가능해집니다. 발주서에 듀얼 그리퍼를 명시하십시오.**
 
-### But three practical caveats, all of which cost you work
+### 그리퍼 명령이 파이프라인에 들어가야 하는 지점
 
-**(a) It is NOT in the default data path.** The official `mcap2lerobot` converter's `STATE_TOPICS` is only `['singorix/wbcs/sensor']` and `IMAGE_TOPICS` is the 4 cameras. Grepping the converter for force/wrench returns nothing. The output parquet schema is 7 columns with **zero F/T channels**. **Fork the converter and add the wrench channel to both recording and conversion BEFORE you collect a single episode.** Retrofitting force onto already-collected demonstrations is impossible. This is not a config flag; budget for it.
+**Model 2의 출력, 연속 폭으로. Model 2를 14차원 → 16차원으로 확장하십시오.**
 
-**(b) There is no public G1 data with F/T.** BAAI's RoboCOIN release (~2,974 episodes / 2.02 M frames / ~18.7 h of real G1 bimanual data — genuinely useful, download it) has no F/T channel either. So F/T is the one Model 2 input you can neither pretrain on public data nor obtain for free.
+근거:
 
-**(c) [VERIFIED HERE] It is not in the sim assets.** I grepped `urdf/`, `xacro/`, `mjcf/` for force/torque/ft_sensor. The 27 hits in the MJCF are all `forcerange` **actuator** attributes. There are **0 `<site>` elements and 0 force/torque sensor elements**. You must hand-add MuJoCo `<site>` + `<sensor type="force"/torque">` elements and **guess the mounting frame**, because the F/T sensor's mounting pose is not published.
+- **Model 1의 포즈 일부로는 들어갈 수 없습니다.** 6-DoF 포즈에는 개폐 차원이 없습니다. Model 1이 발언권을 갖게 하려면 폭이 아니라 **이산 파지 위상**(접근 / 닫기 / 들기 / 놓기)을 내야 합니다.
+- **Model 2의 출력이어야 합니다.** 파지 타이밍이 접촉 조건부이고, **Model 2가 손목 F/T를 보는 유일한 모델**이기 때문입니다. 올바른 순간에 그리퍼를 닫는 것이 정확히 힘 피드백이 알려주는 결정입니다. 그리고 **여기가 F/T 입력이 위치 목표를 슬쩍 미는 게 아니라 직접적인 구동 결과를 갖는 유일한 지점**입니다.
+- **공식 파이프라인으로 수집한 데이터로 14차원 정책을 학습시키면 23개 액션 차원 중 9개를 조용히 버립니다 — 파지 개폐 포함. 정책이 구조적으로 아무것도 집을 수 없게 됩니다.**
 
-### The fallback, and how much weaker it is
+**개폐 출력을 추가한 뒤에도 남는 하위 결함 둘:**
 
-If F/T turned out absent (it does not — but the question is worth answering because you may need to degrade gracefully): **`JointState` carries per-joint `effort` in N·m AND `current` in Amperes** — you can *observe* torque even though you cannot *command* it. The converter has a `use_effort` flag exposing joint effort.
+- **이진 개폐로는 불충분합니다.** UMI: "binary gripper actions will be unlikely to meet the precision requirement" *(이진 그리퍼 행동은 정밀도 요구를 만족시키기 어렵다)*. 그리고 연속 폭은 시리즈 탄성 손가락 변형을 통한 **암묵적 파지력 채널**이기도 합니다.
+- **그리퍼 *상태*가 입력이어야 합니다.** 이진 명령 상태만으로는 "파지 닫힘"(물체 잡힘)과 "빈손 닫힘"(놓침)을 구분할 수 없습니다. 그러면 정책이 *"incorrectly transitions to post-grasp actions like pull despite lacking a secure grasp"*(안정적 파지가 없는데도 당기기 같은 파지 후 행동으로 잘못 전이) — 즉 **아무것도 안 든 채로 나머지 궤적 전체를 조용히 실행**합니다. 실제 피드백이 있으면 교란 하에서 10–30% → **100%**.
+- 그리퍼와 팔의 타이밍 스큐 하나만으로 UMI가 **87.5% → 57.5%** 로 떨어졌습니다.
 
-**How much weaker — three distinct degradations:**
-
-1. **Rank deficiency.** Joint torques give you contact wrench only through Jᵀ. Wrench components lying in the null space of Jᵀ are *structurally invisible* — most obviously, any force along a joint axis. A dedicated 6-axis wrist sensor observes all six components unconditionally. This is not a resolution problem; it is an observability problem, and no filtering fixes it.
-2. **Contamination.** The measured joint torque is contact torque *plus* gravity, link inertia, Coriolis, gear friction, and harmonic-drive ripple. On a geared arm, static friction alone is commonly 10–30% of rated torque, and it is hysteretic, so it does not subtract cleanly. You would need a well-identified dynamic model just to get started, and the G1's inertial parameters in the URDF are already suspect — **[VERIFIED HERE] the URDF's total mass sums to 116.18 kg against the official 92.5 kg spec**, mostly from 40 passive omni-wheel roller links, so do not trust it for dynamics without auditing.
-3. **Resolution.** Realistically you would resolve contact forces to a few Newtons at best, versus the sub-Newton floor typical of a purpose-built wrist F/T cell. Call it **roughly one to two orders of magnitude worse**, with the caveat below.
-
-⚠️ **Unverified, and it matters a great deal:** I could find **no make, model, measurement range, resolution, noise floor, sampling rate, overload limit, or mounting frame** for the G1's F/T sensors, and **no statement of whether the reading is gravity/payload-compensated or raw.** A raw uncompensated wrench with a 5 kg payload hanging off it is nearly useless until you subtract the tool weight yourself. **Ask the vendor for the F/T datasheet and the compensation semantics.** This is likely a sales-contact item.
-
-⚠️ Also unverified: the SDK enum is named `GalbotOneFoxtrotSensor` — a *variant-specific* name — while the converter reports `robot_type = "G1_V2.2B"` and the open-source description is "Golf." The generation lineage appears to be Charlie → Foxtrot → Golf and **the joint counts differ between them** (Isaac Lab's Charlie has `leg_joint1..4`; Golf has `leg_joint1..5`). **Confirm which generation you are buying and that it carries the F/T sensors.**
-
-### Does F/T justify the learned low level?
-
-**Partially, and conditionally.** Because you cannot command torque, F/T can only enter as an **observation that shifts position targets** — making Model 2 an *admittance* controller. Admittance quality is bounded entirely by loop rate, and the loop rate is **undocumented everywhere**.
-
-- If the achievable closed loop is **~30 Hz** (the dataset fps, the camera rate, the action definition — everything converges here), your admittance bandwidth is maybe 3–5 Hz. Enough for slow insertion-with-search and wiping. Not enough for impact absorption or slip arrest.
-- If it is **125 Hz** (the SDK's own VLA example uses `dt = 0.008 s`), admittance becomes genuinely useful.
-
-**At 30 Hz, the two-model split also loses its main rationale** — a separate "fast" Model 2 has little room to be meaningfully faster than Model 1, which undercuts the entire slow-planner/fast-reflex premise. This is why the loop rate is the week-one measurement.
-
-⚠️ **Red flag:** the SDK's own `example8_real_time_control_loop.cpp`, despite its name, is a 1 Hz blocking waypoint demo with `sleep_for(1 second)` between waypoints and `max_speed = 0.1 rad/s`. **Not one example in the entire SDK demonstrates a closed-loop high-rate streaming controller, and no document anywhere states a frequency.** Do not assume a fast loop until you have measured it.
+**수정 규모를 한 자릿수 바꾸는 미확인 하드웨어 질문:** "양손"이 평행 조가 아니라 **다지 핸드**를 의미한다면, 빠진 필드는 스칼라 2개가 아니라 **24–44 차원**이고, 접촉 휴리스틱으로 미룰 수 없는 사전 형상(pre-shaping) 결정이 추가됩니다.
 
 ---
 
-## Sim plan — **viable, but only on MuJoCo, and the assets are missing exactly what you need**
+## 손목 F/T — **네, 표준 하드웨어입니다. 핵심 의존성이 성립합니다.**
 
-### The gate is PASSED — I re-verified it on this machine today
+세 경로로 독립 확인:
 
-I installed MuJoCo 3.11.0 into a venv on this M4 Mac mini (arm64, 32 GB) and loaded the official `mjcf/galbot_one_golf_fixed_base.xml`. **[VERIFIED HERE]**
+1. **공식 하드웨어 스펙 표:** 腕部（左右合计）深度相机x2，**腕部六维力传感器x2** — 손목 6축 힘/토크 센서 2개, **"옵션" 표기 없이** 열거.
+2. **일급 SDK API:** `robot.get_force_sensor_data(GalbotOneFoxtrotSensor.LEFT_WRIST_FORCE / RIGHT_WRIST_FORCE)` 가 `force.x/y/z`(**뉴턴**), `torque.x/y/z`(**N·m**), `timestamp_ns` 를 담은 `ForceData` 구조체를 반환.
+3. **전용 예제 프로그램이 SDK에 동봉:** `get_force_sensor_data_example.cpp` / `.py`.
+
+이것이 make-or-break 미지수였고, 답은 **명백히 예**입니다.
+
+### 그러나 실무적 함정이 셋 있고, 모두 작업을 요구합니다
+
+**(a) 기본 데이터 경로에 없습니다.** 공식 `mcap2lerobot` 컨버터의 `STATE_TOPICS`는 `['singorix/wbcs/sensor']` 하나뿐이고 `IMAGE_TOPICS`는 카메라 4개뿐입니다. 컨버터에서 force/wrench를 grep하면 아무것도 안 나옵니다. 출력 parquet 스키마는 7컬럼이고 **F/T 채널이 0개**입니다. **에피소드 하나를 수집하기 전에 컨버터를 포크해서 기록과 변환 양쪽에 렌치 채널을 추가하십시오.** 이미 수집한 데모에 힘을 소급 추가하는 것은 불가능합니다. 설정 플래그가 아니라 **개발 항목으로 편성하십시오.**
+
+**(b) F/T가 있는 공개 G1 데이터가 없습니다.** BAAI의 RoboCOIN 릴리스(**~2,974 에피소드 / 2.02 M 프레임 / ~18.7시간의 실기체 G1 양팔 데이터** — 진짜 유용하니 받으십시오)에도 F/T 채널이 없습니다. 따라서 **F/T는 공개 데이터로 사전학습할 수도, 공짜로 얻을 수도 없는 유일한 Model 2 입력**입니다.
+
+**(c) [직접 검증] 시뮬 자산에도 없습니다.** `urdf/`, `xacro/`, `mjcf/`에서 force/torque/ft_sensor를 grep했습니다. MJCF의 27건 히트는 전부 `forcerange` **액추에이터** 속성입니다. **`<site>` 요소 0개, 힘/토크 센서 요소 0개.** MuJoCo `<site>` + `<sensor type="force"/"torque">` 요소를 손으로 추가해야 하고, **F/T 센서의 마운팅 자세가 공개되지 않았으므로 추측해야 합니다.**
+
+### 대체 수단, 그리고 얼마나 약한가
+
+만약 F/T가 없다면(없지 않지만, 우아한 성능 저하를 위해 답해둘 가치가 있습니다): **`JointState`가 관절별 `effort`(N·m)와 `current`(암페어)를 담습니다** — 토크를 **명령**할 수는 없지만 **관측**할 수는 있습니다. 컨버터에 관절 effort를 노출하는 `use_effort` 플래그가 있습니다.
+
+**얼마나 약한가 — 서로 다른 세 가지 열화:**
+
+1. **랭크 결손(rank deficiency).** 관절 토크는 Jᵀ를 통해서만 접촉 렌치를 줍니다. Jᵀ의 영공간에 놓인 렌치 성분은 **구조적으로 보이지 않습니다** — 가장 명백하게는 관절 축 방향의 힘이 그렇습니다. 전용 6축 손목 센서는 여섯 성분 전부를 무조건적으로 관측합니다. **이건 분해능 문제가 아니라 관측가능성 문제이고, 어떤 필터링도 해결하지 못합니다.**
+2. **오염(contamination).** 측정된 관절 토크는 접촉 토크 *더하기* 중력, 링크 관성, 코리올리, 기어 마찰, 하모닉 드라이브 리플입니다. 감속기가 있는 팔에서 정지 마찰만으로도 흔히 정격 토크의 10–30%이고, 히스테리시스가 있어 깔끔하게 빠지지 않습니다. 시작하려면 잘 동정된 동역학 모델이 필요한데, **[직접 검증] URDF의 총질량이 공식 스펙 92.5 kg에 대해 116.18 kg으로 합산되므로**(대부분 40개 수동 옴니휠 롤러 링크에서) 감사 없이 동역학에 신뢰하지 마십시오.
+3. **분해능.** 현실적으로 접촉력을 잘해야 수 뉴턴까지 분해할 것이고, 전용 손목 F/T 셀의 서브뉴턴 수준과 대비됩니다. 아래 유보 사항과 함께 **대략 1~2자리 나쁘다**고 보십시오.
+
+⚠️ **미확인이고 매우 중요합니다:** G1 F/T 센서의 **제조사·모델·측정범위·분해능·노이즈 플로어·샘플링 레이트·과부하 한계·마운팅 프레임을 하나도 찾지 못했고**, **측정값이 중력/페이로드 보상된 것인지 원시값인지에 대한 언급도 없습니다.** 5 kg 페이로드가 매달린 원시 무보상 렌치는 공구 무게를 직접 빼기 전까지 거의 쓸모가 없습니다. **F/T 데이터시트와 보상 semantics를 벤더에 요청하십시오.** 아마 영업 담당 사안입니다.
+
+⚠️ 또 하나 미확인: SDK enum 이름이 `GalbotOneFoxtrotSensor` — **변종 특정(variant-specific) 이름** — 인데 컨버터는 `robot_type = "G1_V2.2B"`를 보고하고 오픈소스 기술서는 "Golf"입니다. 세대 계보는 Charlie → Foxtrot → Golf로 보이고 **세대 간 관절 수가 다릅니다**(Isaac Lab의 Charlie는 `leg_joint1..4`, Golf는 `leg_joint1..5`). **어느 세대를 구매하는지, 그것이 F/T 센서를 탑재하는지 확인하십시오.**
+
+### F/T가 학습된 저수준 계층을 정당화하는가?
+
+**부분적으로, 조건부로.** 토크를 명령할 수 없으므로 F/T는 **위치 목표를 이동시키는 관측**으로만 들어올 수 있습니다 — 즉 Model 2를 *어드미턴스* 컨트롤러로 만듭니다. 어드미턴스 품질은 전적으로 **루프 레이트에 의해 상한이 정해지고, 그 루프 레이트는 모든 곳에서 미문서화**입니다.
+
+- 달성 가능한 폐루프가 **~30 Hz**(데이터셋 fps, 카메라 레이트, 액션 정의 — 모든 것이 여기로 수렴합니다)라면 어드미턴스 대역폭은 잘해야 3–5 Hz입니다. **느린 삽입-with-search와 닦기에는 충분. 충격 흡수나 미끄러짐 정지에는 불충분.**
+- **125 Hz**(SDK 자체 VLA 예제가 `dt = 0.008 s`를 씁니다)라면 어드미턴스가 진짜로 유용해집니다.
+
+**30 Hz라면 2모델 분리도 주된 근거를 잃습니다** — 별도의 "빠른" Model 2가 Model 1보다 의미 있게 빠를 여지가 거의 없고, 이는 **느린 계획자/빠른 반사라는 전제 전체를 무너뜨립니다.** 이것이 루프 레이트가 1주차 측정인 이유입니다.
+
+⚠️ **경고 신호:** SDK 자체 `example8_real_time_control_loop.cpp`가 이름과 달리 웨이포인트 사이에 `sleep_for(1 second)`를 넣고 `max_speed = 0.1 rad/s`인 **1 Hz 블로킹 웨이포인트 데모**입니다. **SDK 전체에서 폐루프 고속 스트리밍 컨트롤러를 시연하는 예제가 하나도 없고, 어떤 문서도 주파수를 명시하지 않습니다. 측정하기 전까지 빠른 루프를 가정하지 마십시오.**
+
+---
+
+## 시뮬 계획 — **가능하지만 MuJoCo에서만이고, 자산에는 필요한 것이 정확히 빠져 있습니다**
+
+### 게이트는 통과 — 이 기기에서 재확인했습니다
+
+이 M4 Mac mini(arm64, 32 GB)의 venv에 MuJoCo 3.11.0을 설치하고 공식 `mjcf/galbot_one_golf_fixed_base.xml`을 로드했습니다. **[직접 검증]**
 
 ```
 nq=33  nv=33  nu=23  nbody=65  ngeom=268  ncam=0  nsensor=21  timestep=0.002
-3000 steps in 0.067 s  ->  44,735 steps/s  =  89.5x realtime  (single-threaded)
-offscreen render 480x640: OK
-23 actuators: leg 1-5, head 1-2, left_arm 1-7, left_gripper, right_arm 1-7, right_gripper
+3000 스텝 0.067 s  ->  44,735 steps/s  =  89.5× 실시간 (싱글 스레드)
+오프스크린 렌더 480x640: OK
+액추에이터 23개: leg 1-5, head 1-2, left_arm 1-7, left_gripper, right_arm 1-7, right_gripper
 ```
 
-Zero load errors. Galbot ships a genuinely simulation-ready model: real inertias (91 of 104 links), real joint/effort/velocity limits, mesh collision geometry with convex decomposition, proper `<mimic>` gripper linkages, and tuned position actuators. **You can start building against true G1 kinematics today, on the hardware you already own, with zero vendor contact.** That is a far stronger starting position than most Chinese humanoid platforms offer.
+로드 오류 0건. Galbot은 **진짜로 시뮬레이션 준비가 된 모델**을 제공합니다: 실제 관성(104개 링크 중 91개), 실제 관절/토크/속도 한계, 볼록 분해된 메시 충돌 형상, 제대로 된 `<mimic>` 그리퍼 링키지, 튜닝된 위치 액추에이터. **벤더 접촉 없이, 이미 보유한 하드웨어에서, 오늘 진짜 G1 기구학으로 개발을 시작할 수 있습니다.** 대부분의 중국 휴머노이드 플랫폼이 제공하는 것보다 훨씬 강한 출발 위치입니다.
 
-### But the CUDA-only lockout is real and total
+### 그러나 CUDA 전용 잠금은 실재하고 완전합니다
 
-| Simulator | G1 asset? | macOS / Apple Silicon? |
+| 시뮬레이터 | G1 자산? | macOS / Apple Silicon? |
 |---|---|---|
-| **MuJoCo / MJX** | **Official MJCF, Apache-2.0** | **Yes — verified 89.5× realtime here** |
-| Isaac Sim / Isaac Lab | **Best G1 support that exists** — first-party `GALBOT_ONE_CHARLIE_CFG`, 5 registered Gym tasks, RMPFlow controllers, and 4 `isaaclab_mimic` envs for demo amplification | **No.** x86_64 + NVIDIA RTX only. Unreachable. |
-| ManiSkill / SAPIEN | No G1 asset | Docs: *"no support for MacOS at the moment"* |
-| RoboTwin 2.0 | **No** — 5 embodiments, G1 not among them | SAPIEN-based, same restriction |
-| Genesis | No G1 asset found | Claims Apple Silicon via MPS; **untested with this MJCF** |
+| **MuJoCo / MJX** | **공식 MJCF, Apache-2.0** | **가능 — 여기서 89.5× 실시간 확인** |
+| Isaac Sim / Isaac Lab | **존재하는 최고의 G1 지원** — 일급 `GALBOT_ONE_CHARLIE_CFG`, 등록된 Gym 태스크 5개, RMPFlow 컨트롤러, 데모 증폭용 `isaaclab_mimic` 환경 4개 | **불가.** x86_64 + NVIDIA RTX 전용. 도달 불가 |
+| ManiSkill / SAPIEN | G1 자산 없음 | 문서: *"no support for MacOS at the moment"* |
+| RoboTwin 2.0 | **없음** — 임베디먼트 5개에 G1 미포함 | SAPIEN 기반, 동일 제약 |
+| Genesis | G1 자산 미발견 | MPS 경유 Apple Silicon 주장. **이 MJCF로는 미검증** |
 
-**So: the sim-first plan is viable, but "sim-first" here means "MuJoCo-first," and you are locked out of the richest G1 tooling in existence.** The Isaac Lab Galbot suite — the one thing that would give you photorealistic rendering and automatic demo expansion — needs x86_64 Linux + RTX.
+**즉, 시뮬 우선 계획은 가능하지만 여기서 "시뮬 우선"은 "MuJoCo 우선"을 의미하고, 존재하는 가장 풍부한 G1 툴링에서 잠겨 있게 됩니다.** 포토리얼리스틱 렌더링과 자동 데모 확장을 줄 유일한 것인 Isaac Lab Galbot 스위트는 x86_64 Linux + RTX를 요구합니다.
 
-### What the MuJoCo assets are missing, specifically for *your* architecture
+### MuJoCo 자산에 빠진 것, 특히 *당신 아키텍처에* 필요한 것
 
-**[VERIFIED HERE]** — these are not minor:
+**[직접 검증]** — 사소한 것들이 아닙니다:
 
-1. **`ncam = 0`.** No cameras at all in the MJCF. You cannot render *any* policy observation out of the box.
-2. **No head camera link anywhere** in URDF, xacro, or MJCF. Only wrist camera links exist. The head-camera extrinsic is unpublished, so you cannot even add it correctly without hand-eye calibration on real hardware.
-3. **0 sites, 0 F/T sensors.** Model 2's defining input cannot be simulated without hand-authoring sites at a mounting frame nobody has published.
-4. **No photorealism.** MuJoCo rendering will not survive sim-to-real visual transfer for a VLA. Galbot's own SynGrasp-1B pipeline used MuJoCo *only for physics validation* and re-rendered everything in Isaac Sim with ray tracing for the actual training images.
+1. **`ncam = 0`.** MJCF에 카메라가 아예 없습니다. **어떤 정책 관측도 기본 상태로는 렌더할 수 없습니다.**
+2. **URDF·xacro·MJCF 어디에도 헤드 카메라 링크가 없습니다.** 손목 카메라 링크만 존재합니다. 헤드 카메라 외부 파라미터가 미공개이므로, 실기체 손-눈 캘리브레이션 없이는 올바르게 추가할 수조차 없습니다.
+3. **site 0개, F/T 센서 0개.** Model 2의 정의적 입력을, 아무도 공개하지 않은 마운팅 프레임에 site를 손으로 authoring하지 않고는 시뮬할 수 없습니다.
+4. **포토리얼리즘 없음.** MuJoCo 렌더링은 VLA의 시각 sim-to-real 전이를 통과하지 못합니다. Galbot 자신의 SynGrasp-1B 파이프라인도 MuJoCo를 **물리 검증에만** 쓰고, 실제 학습 이미지는 Isaac Sim 레이트레이싱으로 재렌더했습니다.
 
-### Recommended split
+### 권장 분업
 
-- **Mac mini / MuJoCo:** kinematics, the S–R–S IK + arm-angle solver, frame-transform correctness, controller and interface development, self-collision and reachability studies across the 650 mm torso range, ψ-parameterization validation, unit tests. All of this is high-value and none of it needs a GPU.
-- **Do NOT plan on MuJoCo→real visual transfer.** It will not work.
-- **If you need the NVIDIA half** (Isaac Lab tasks, Mimic demo amplification, photorealistic rendering): rent a cloud L4/A10 Linux instance, or buy one used RTX box. This is a few thousand dollars, not a rearchitecture. **Budget for it explicitly — do not architect as if one Mac is sufficient.**
+- **Mac mini / MuJoCo:** 기구학, S–R–S IK + 팔 각도 솔버, 프레임 변환 정확성, 컨트롤러·인터페이스 개발, 650 mm 토르소 범위 전체의 자기충돌·도달가능성 연구, ψ 파라미터화 검증, 유닛 테스트. **전부 고가치이고 GPU가 필요 없습니다.**
+- **MuJoCo → 실기체 시각 전이는 계획에 넣지 마십시오. 작동하지 않습니다.**
+- **NVIDIA 쪽이 필요하면**(Isaac Lab 태스크, Mimic 데모 증폭, 포토리얼 렌더링): 클라우드 L4/A10 Linux 인스턴스를 빌리거나 중고 RTX 박스를 사십시오. **수천 달러이지 재설계가 아닙니다. 명시적으로 예산에 넣고, Mac 한 대로 충분한 것처럼 설계하지 마십시오.**
 
-### And a separate, harder blocker for the Mac
+### 그리고 Mac에는 더 단단한 별개의 차단 요인이 있습니다
 
-**The GalbotSDK is Linux-only.** README: Ubuntu 20–24, Python 3.8–3.14. The shipped binary directories are literally `linux-x86_64-gcc940` and `linux-aarch64-gcc940`. There is no macOS build, no macOS wheel, no Darwin mention anywhere in a 34,000-file repo. **The M4 Mac mini physically cannot link the SDK, cannot talk to the robot, cannot run teleop collection, and cannot host deployment.** (Technically inferred from exhaustive absence rather than an explicit statement, but treat as certain.)
+**GalbotSDK는 Linux 전용입니다.** README: Ubuntu 20–24, Python 3.8–3.14. 출하되는 바이너리 디렉토리가 문자 그대로 `linux-x86_64-gcc940`과 `linux-aarch64-gcc940`입니다. 34,000개 파일 레포 전체에 **macOS 빌드도, macOS 휠도, Darwin 언급도 없습니다.** **M4 Mac mini는 물리적으로 SDK를 링크할 수 없고, 로봇과 대화할 수 없고, 텔레옵 수집을 실행할 수 없고, 배포를 호스팅할 수 없습니다.** (명시적 진술이 아니라 전수 부재로부터의 추론이지만, 확실한 것으로 취급하십시오.)
 
-Your options: (a) run inference on the onboard **AGX Orin 64 GB / 275 TOPS**, which is already on the robot and eliminates a network hop; (b) put a small Linux box on the robot LAN as SDK host and let the Mac serve inference over a socket; (c) keep the Mac for training and MuJoCo only. **Option (a) is right for Model 2.** The Orin is a stronger inference target than the M4 for this workload, and it removes exactly the latency that determines whether your F/T feedback means anything. External-host control *is* a supported mode (`system.cfg` has `device_type: "pc"`, with a documented PC/XCU/HPU IP topology) — but every control cycle then crosses Ethernet, and you have not measured that cost.
+선택지: **(a)** 로봇에 **이미 탑재된 AGX Orin 64 GB / 275 TOPS**에서 추론 — 네트워크 홉이 제거됩니다. **(b)** 로봇 LAN에 작은 Linux 박스를 SDK 호스트로 두고 Mac이 소켓으로 추론을 서비스. **(c)** Mac은 학습과 MuJoCo 전용. **Model 2에는 (a)가 맞습니다.** Orin이 이 워크로드에서 M4보다 강한 추론 타깃이고, **F/T 피드백이 의미를 갖는지를 결정하는 바로 그 지연을 제거합니다.** 외부 호스트 제어도 지원되는 모드지만(`system.cfg`에 `device_type: "pc"`와 문서화된 PC/XCU/HPU IP 토폴로지가 있습니다) — 그러면 매 제어 사이클이 이더넷을 건너고, 그 비용을 아직 측정하지 않았습니다.
 
-⚠️ Two procurement issues to raise with Galbot **now**, because neither is fixable in your software layer: **no ISO 10218 / ISO 13849 PL / ISO/TS 15066 / TÜV / CE evidence exists in any source** for a 92.5 kg bimanual machine intended to work near people; and the SDK ships **hardcoded root credentials over a flat LAN** (`XCU root/<redacted>`, `HPU galbot/<redacted>`), a posture no enterprise customer will accept unchanged.
-
----
-
-## The wedge question — direct answer
-
-**"Galbot ships their own VLA for this robot" is half true, and the half that is false is the half that matters.**
-
-Here is what actually exists:
-
-- **GraspVLA** (CoRL 2025) is published with code and weights. But: it is **CC BY-NC 4.0 — non-commercial**, ships **inference-only with no finetuning code**, its **dataset (SynGrasp-1B) is unreleased**, and — decisively — **its real-robot experiments ran on a single-arm Franka Panda, not a Galbot G1.** The paper's own Limitations section says so: *"our data generation and evaluation are conducted exclusively on the Franka Panda arm... We leave this engineering effort as future work."* **I found no paper, repo, or demo showing GraspVLA controlling a G1.**
-- **AstraBrain (银河星脑)** and **GroceryVLA** have **no paper, no arXiv entry, no weights, no model size, no control rate, no benchmark, no interface spec, and no developer API.** Every claim traces to Chinese press coverage of company statements.
-
-**So "finetune the vendor model" is not actually on the table for a commercial product.** The licence forecloses it and the artifacts do not exist.
-
-### The real choice, and my answer
-
-The question is not "vendor model vs. own model." It is **"finetune an open model vs. train from scratch."** And the answer is unambiguous:
-
-**Finetune an open, permissively-licensed model (π0 / π0.5 / SmolVLA / GR00T-class) in Galbot's own LeRobot format, against Galbot's own shipped WBC.** Training from scratch is indefensible: SynGrasp-1B cost **160 × RTX 4090 for 10 days ≈ 38,400 GPU-hours** — for *single-arm, gripper-only, tabletop grasping with no force*. You cannot reproduce that, and it is not even your task.
-
-Look at the other end of Galbot's own pipeline instead: **few-shot post-training worked with 100, 100, and 10 demonstrations.** That is the actionable number. Size your teleop budget in **hundreds of demos for adaptation**, not tens of thousands for pretraining.
-
-### And now the harder truth about your architecture
-
-**Cut the learned Model 2 from v1.** Not forever — from v1.
-
-The SDK already ships your Model 2 in analytic form, and it is better than you think:
-
-- `set_end_effector_command(poses=[[x,y,z,qx,qy,qz,qw],...], end_effector_frames, reference_frames)` — **exactly Model 1's proposed output signature, natively supported.**
-- `get_wbc_end_effector_poses()` returns `lee_pose`, `ree_pose`, `head_pose` — exactly Model 1's proposed input.
-- Backed by `GalbotMotion`: `inverse_kinematics`, `forward_kinematics`, `get_jacobian`, single/multi-waypoint planning, RRT/RRT*, self-collision checking, tool attach/detach.
-- Streamable at 125 Hz per the vendor's own VLA example, with the docs explicitly steering you to `set_joint_commands` / `set_joint_commands_batch` for *"per-frame model inference output"* and explicitly warning **away** from `set_joint_positions` for that purpose.
-- **And now, thanks to the S–R–S structure I verified, you also have a closed-form analytic IK of your own** as a second baseline.
-
-**Galbot's own researchers did not learn a cerebellum.** In GraspVLA's real deployment they used a **hand-written Cartesian impedance controller** with Jacobian transform and singularity handling, a receding-horizon scheme over the action chunk, and a **triple-cascaded first-order Butterworth filter** (chosen over Bessel and Chebyshev-II to avoid overshoot). They had the option to learn it and chose not to.
-
-You would be spending months training, from self-collected teleop, a neural replacement for a component the vendor ships working and the vendor's own researchers deliberately hand-wrote. **That is the weakest part of the plan and it should be the first thing cut.**
-
-### So what IS the wedge? Force. And it is real.
-
-Assemble the facts:
-
-- The G1 has **2× wrist 6-axis F/T sensors in hardware**, with a clean first-party API.
-- **GraspVLA uses no force and no tactile at all.** Its inputs are RGB + text + proprioception.
-- **GraspVLA's own failure analysis blames force-blindness:** *"21% of failures involve objects with smooth surfaces (e.g., plastic balls) slipping during grasping, which tactile feedback might help resolve."*
-- **Galbot's own blessed data converter silently DROPS force/torque** — it does not even export the `effort` field that is present in the source protobuf.
-- **All public G1 datasets have zero F/T channels.**
-- **The sim assets have zero F/T frames.**
-- **I found no Galbot model that consumes force, anywhere.**
-
-The vendor has first-party force hardware that **none of its published models use and its public data pipeline discards.** Meanwhile, the deployment numbers everyone cites (>95% grasp, >99.97% coffee, 370 orders/day) are all **grasp-attempt success or throughput — never task completion — and human intervention rate is never reported in any source, in either language.** A 40 m² pharmacy with a fixed 6,000-slot planogram is close to structured pick-and-place that the SDK's classical planner could largely solve; no source disambiguates whether a VLA is even in that loop.
-
-**Contact-rich, force-aware, BIMANUAL manipulation is a genuine hole in everything Galbot has published.** That is your wedge. Not "a better VLA." Not "a learned IK."
-
-### One design idea worth stealing outright
-
-GraspVLA's **Progressive Action Generation** is the most transferable result in the paper: by forcing the model to emit a **2D bounding box first** — an intermediate target that cheap *internet grounding data* can also supervise — Galbot got open-vocabulary generalization from a policy trained on only 240 object categories. Web-category success jumped from 40.0 (π0) to **93.3**.
-
-**Your Model 1 is structurally the same move**: an intermediate spatial target supervisable from non-robot data. **This is the strongest argument FOR your two-level design** — and it points at a concrete tactic: **co-train Model 1 on internet grounding/pose data** so it generalizes past the objects in your teleop set. Note the cost, though: those CoT tokens are **122 of GraspVLA's 195 ms**. The reasoning is what makes it slow, not the action head. Budget Model 1 at 1–5 Hz.
+⚠️ **지금 Galbot에 제기할 조달 이슈 둘.** 소프트웨어 계층에서 고칠 수 없는 것들입니다: 사람 근처에서 작동하도록 의도된 **92.5 kg 양팔 기계에 대해 ISO 10218 / ISO 13849 PL / ISO/TS 15066 / TÜV / CE 근거가 어떤 출처에도 없습니다.** 그리고 SDK가 **평면 LAN에 하드코딩된 root 자격증명**(`XCU root/<redacted>`, `HPU galbot/<redacted>`)을 실어 보냅니다 — 어떤 엔터프라이즈 고객도 이 상태로 수용하지 않을 보안 태세입니다.
 
 ---
 
-## Revised recommendation
+## 승부처 질문 — 직접적인 답
 
-**Build a single vision-language policy that emits both-hands targets in `torso_base_link` frame, and drive the robot with the vendor's shipped whole-body controller plus your own closed-form S–R–S arm-angle IK — no learned low level in v1.** Concretely: fork `galbot-mcap2lerobot` *before collecting anything* and add the wrist wrench channel plus per-joint effort to the schema, since force is your only defensible wedge and it cannot be retrofitted onto recorded episodes; define your interface as **8 numbers per hand** — `[x, y, z, qx, qy, qz, qw, ψ]` where ψ is the arm angle, whose labels you get free by FK on isomorphic TM01 teleop — and convert to arm-base frame at capture time using the live `head_joint1/2` values, killing the moving-frame problem outright; feed the policy the **full 21-D proprioceptive state** (14 arm + 2 head + 5 leg/waist), not 14, because with only 40.6° of neck tilt the torso must move constantly and the policy cannot learn reachability it cannot observe; output **16-D** (14 arm + 2 continuous gripper widths in metres) so the robot can actually grasp; initialize from a **permissively-licensed open VLA** (π0-class) finetuned on RoboCOIN's ~2,974 real G1 episodes plus a few hundred of your own force-annotated demos, never from CC-BY-NC GraspVLA weights; use MuJoCo on the Mac for kinematics, IK, and interface correctness, but run inference on the robot's own **AGX Orin**, not over Ethernet from the Mac — the SDK has no macOS build, so the Mac cannot talk to the robot regardless. Reintroduce a learned Model 2 **only** at the specific point where you can demonstrate the analytic WBC failing — most likely vision-conditioned obstacle avoidance, since `GalbotMotion` has no real-time obstacle perception by the vendor's own admission — and keep Model 1's output contract fixed at that 8-per-hand pose so a learned Model 2 can be swapped in later at the identical interface.
+**"Galbot이 이 로봇용 자체 VLA를 출하한다"는 절반은 사실이고, 거짓인 절반이 중요한 절반입니다.**
 
-### The single week-one measurement
+실제로 존재하는 것:
 
-**Measure the closed-loop command bandwidth and end-to-end latency of `set_joint_commands`, from the on-robot HPU and from an external host, in the same session.**
+- **GraspVLA**(CoRL 2025)는 코드와 가중치와 함께 공개됐습니다. 그러나: **CC BY-NC 4.0 — 비상업**, **파인튜닝 코드 없는 추론 전용** 출하, **데이터셋(SynGrasp-1B) 미공개**, 그리고 결정적으로 — **실기체 실험이 Galbot G1이 아니라 단일팔 Franka Panda에서 수행됐습니다.** 논문 자체의 Limitations 절이 그렇게 말합니다: *"our data generation and evaluation are conducted exclusively on the Franka Panda arm... We leave this engineering effort as future work."* **GraspVLA가 G1을 제어하는 논문·레포·데모를 하나도 찾지 못했습니다.**
+- **AstraBrain(银河星脑)** 과 **GroceryVLA** 는 **논문 없음, arXiv 항목 없음, 가중치 없음, 모델 크기 없음, 제어 레이트 없음, 벤치마크 없음, 인터페이스 스펙 없음, 개발자 API 없음.** 모든 주장이 회사 발표에 대한 중국어 언론 보도로 소급됩니다.
 
-Method: stream small position deltas to one arm joint (`left_arm_joint4`) while logging `JointState.timestamp_ns`, `position`, and `effort`. Two parts: **(1)** ramp the command rate until commands are dropped or motion becomes visibly discontinuous — that is your ceiling; **(2)** inject a swept sine (±2°, 0.5→10 Hz) and read the magnitude and phase of the measured response to get an actual Bode plot of the position-tracking loop.
+**따라서 "벤더 모델을 파인튜닝한다"는 상업 제품에 대해서는 실제로 선택지에 없습니다.** 라이선스가 막고, 산출물이 존재하지 않습니다.
 
-**Why this one and nothing else:** the loop rate is undocumented in every source — the 274 K-character API reference never states a number, "Hz" and "frequency" and "latency" appear nowhere as figures, and the SDK's own file named `real_time_control_loop.cpp` is a 1 Hz blocking demo. Yet **every downstream decision hangs on it**: whether F/T feedback can close a meaningful admittance loop at all; whether action chunking or per-step control is right; whether a two-rate cerebrum/cerebellum split is even physically meaningful or whether everything collapses to one ~30 Hz model; how much neck-motion error your latency budget permits (at 30 °/s pan, every 33 ms of latency costs you ~10 mm at 0.6 m reach); and whether off-board inference is tolerable or the Orin is mandatory. Take this measurement before writing a line of policy code.
+### 진짜 선택, 그리고 제 답
+
+질문은 "벤더 모델 vs 자체 모델"이 아닙니다. **"오픈 모델 파인튜닝 vs 처음부터 학습"** 이고, 답은 명확합니다:
+
+**허용적 라이선스의 오픈 모델(π0 / π0.5 / SmolVLA / GR00T급)을 Galbot 자체 LeRobot 포맷으로, Galbot이 출하하는 WBC에 대해 파인튜닝하십시오.** 처음부터 학습은 방어 불가능합니다: SynGrasp-1B는 **RTX 4090 160장 × 10일 ≈ 38,400 GPU시간**이 들었고 — 그것도 **단일팔·그리퍼만·테이블탑 파지·힘 없음**에 대해서입니다. 재현할 수 없고, 당신의 과제도 아닙니다.
+
+대신 Galbot 자체 파이프라인의 **반대쪽 끝**을 보십시오: **few-shot 사후학습이 데모 100개, 100개, 10개로 작동했습니다.** 그것이 실행 가능한 숫자입니다. 텔레옵 예산을 **사전학습용 수만 개가 아니라 적응용 수백 개** 규모로 잡으십시오.
+
+### 그리고 이제 아키텍처에 대한 더 불편한 진실
+
+**v1에서 학습된 Model 2를 빼십시오.** 영원히가 아니라 — v1에서.
+
+**SDK가 이미 당신의 Model 2를 해석적 형태로 출하하고 있고, 생각보다 좋습니다:**
+
+- `set_end_effector_command(poses=[[x,y,z,qx,qy,qz,qw],...], end_effector_frames, reference_frames)` — **Model 1이 제안한 출력 시그니처 그대로, 네이티브 지원.**
+- `get_wbc_end_effector_poses()` 가 `lee_pose`, `ree_pose`, `head_pose` 를 반환 — **Model 1이 제안한 입력 그대로.**
+- `GalbotMotion` 백엔드: `inverse_kinematics`, `forward_kinematics`, `get_jacobian`, 단일/다중 웨이포인트 계획, RRT/RRT*, 자기충돌 검사, 툴 부착/해제.
+- 벤더 자체 VLA 예제 기준 **125 Hz 스트리밍 가능**하고, 문서가 *"per-frame model inference output"* 용도로 `set_joint_commands` / `set_joint_commands_batch`를 명시적으로 안내하며 그 목적에 `set_joint_positions`는 명시적으로 **말립니다.**
+- **그리고 이제 검증된 S–R–S 구조 덕분에, 두 번째 기준선으로 쓸 당신만의 폐형 해석 IK도 갖게 됩니다.**
+
+**Galbot 자신의 연구자들은 소뇌를 학습시키지 않았습니다.** GraspVLA 실기체 배포에서 그들은 자코비안 전치와 특이점 처리를 갖춘 **손으로 쓴 Cartesian 임피던스 컨트롤러**, 액션 청크에 대한 receding-horizon 방식, 그리고 오버슈트를 피하려고 Bessel과 Chebyshev-II 대신 선택한 **3중 캐스케이드 1차 Butterworth 필터**를 사용했습니다. **학습할 수 있었는데 하지 않기로 선택했습니다.**
+
+> **벤더가 작동하는 상태로 출하하고 벤더 자신의 연구자가 의도적으로 손으로 작성한 컴포넌트를, 자체 수집 텔레옵으로 몇 달에 걸쳐 신경망으로 대체하려는 것입니다. 이것이 계획에서 가장 약한 부분이고, 가장 먼저 잘라야 합니다.**
+
+### 그러면 승부처는 무엇인가? 힘입니다. 그리고 이건 진짜입니다.
+
+사실들을 모으면:
+
+- G1에는 **손목 6축 F/T 센서 2개**가 하드웨어로 있고, 깔끔한 일급 API가 있습니다.
+- **GraspVLA는 힘도 촉각도 전혀 쓰지 않습니다.** 입력은 RGB + 텍스트 + 고유수용감각입니다.
+- **GraspVLA 자신의 실패 분석이 힘 무지(force-blindness)를 지목합니다:** *"21% of failures involve objects with smooth surfaces (e.g., plastic balls) slipping during grasping, which tactile feedback might help resolve."*
+- **Galbot의 공인 데이터 컨버터가 힘/토크를 조용히 버립니다** — 소스 protobuf에 존재하는 `effort` 필드조차 내보내지 않습니다.
+- **모든 공개 G1 데이터셋에 F/T 채널이 0개입니다.**
+- **시뮬 자산에 F/T 프레임이 0개입니다.**
+- **힘을 소비하는 Galbot 모델을 어디에서도 찾지 못했습니다.**
+
+**벤더가 일급 힘 하드웨어를 갖고 있는데, 그들이 발표한 어떤 모델도 그것을 쓰지 않고 공개 데이터 파이프라인은 그것을 버립니다.** 한편 모두가 인용하는 배포 수치(파지 >95%, 커피 >99.97%, 일 370건)는 **전부 파지 시도 성공률 또는 처리량이지 작업 완료율이 아니고**, 인간 개입률은 어떤 언어의 어떤 출처에서도 보고되지 않았습니다. 6,000슬롯 고정 플래노그램의 40 m² 약국은 SDK의 고전 플래너가 대부분 풀 수 있는 구조화된 픽앤플레이스에 가깝고, 그 루프에 VLA가 있기는 한지 명확히 하는 출처가 없습니다.
+
+> **접촉 집약·힘 인지·양팔 조작은 Galbot이 발표한 모든 것에서 진짜 구멍입니다. 그게 당신의 승부처입니다. "더 나은 VLA"도, "학습된 IK"도 아닙니다.**
+
+### 그대로 훔칠 만한 설계 아이디어 하나
+
+GraspVLA의 **Progressive Action Generation**이 이 논문에서 가장 이식성 높은 결과입니다: 모델이 **2D 바운딩 박스를 먼저** 내도록 강제해 — 값싼 *인터넷 그라운딩 데이터*로도 감독 가능한 중간 타깃을 만들어 — Galbot은 240개 물체 카테고리로만 학습한 정책에서 개방 어휘 일반화를 얻었습니다. 웹 카테고리 성공률이 π0의 40.0에서 **93.3**으로 뛰었습니다.
+
+**당신의 Model 1은 구조적으로 같은 수(手)입니다**: 비로봇 데이터로 감독 가능한 중간 공간 타깃. **이것이 당신의 2단 설계에 대한 가장 강력한 찬성 논거이고**, 구체적 전술을 가리킵니다: **Model 1을 인터넷 그라운딩/포즈 데이터로 공동학습**시켜 텔레옵 세트의 물체를 넘어 일반화시키십시오. 다만 비용도 보십시오: 그 CoT 토큰이 GraspVLA의 195 ms 중 **122 ms**입니다. **느린 것은 액션 헤드가 아니라 추론입니다. Model 1을 1–5 Hz로 잡으십시오.**
 
 ---
 
-## Unverified — flagged explicitly
+## 개정된 권고
 
-**Resolved by my own URDF parse today** (previously unverified in the research): the full link tree and torso-branch structure; leg joints are revolute not prismatic; neck pan/tilt ROM; S–R–S arm structure with 0.35/0.36 m links; head camera absent from all assets; F/T frames and cameras absent from MJCF; MuJoCo macOS performance.
+**`torso_base_link` 프레임으로 양손 타깃을 내는 단일 비전-언어 정책을 만들고, 벤더가 출하하는 전신 컨트롤러(WBC) 더하기 당신 자신의 폐형 S–R–S 팔 각도 IK로 로봇을 구동하십시오 — v1에 학습된 저수준 계층은 없습니다.**
 
-**Still unverified, public sources exhausted:**
+구체적으로: **아무것도 수집하기 전에** `galbot-mcap2lerobot`를 포크해 스키마에 손목 렌치 채널과 관절별 effort를 추가하십시오 — 힘이 유일한 방어 가능한 승부처인데 기록된 에피소드에 소급 추가가 불가능하기 때문입니다. 인터페이스를 **손당 8개 숫자** `[x, y, z, qx, qy, qz, qw, ψ]`로 정의하십시오(ψ는 팔 각도이고, 라벨은 등가 TM01 텔레옵에 FK를 돌려 공짜로 얻습니다). 그리고 실시간 `head_joint1/2` 값으로 **촬영시각에** arm-base 프레임으로 변환해 이동 프레임 문제를 즉사시키십시오. 정책에 **21차원 고유수용감각 상태 전체**(팔 14 + 헤드 2 + 다리/허리 5)를 주십시오 — 14가 아닙니다. 목 틸트가 40.6°뿐이라 토르소가 상시 움직여야 하고, **정책은 관측할 수 없는 도달가능성을 학습할 수 없습니다.** 출력은 **16차원**(팔 14 + 미터 단위 연속 그리퍼 폭 2)이어야 로봇이 실제로 파지할 수 있습니다. **허용적 라이선스의 오픈 VLA(π0급)** 에서 초기화해 RoboCOIN의 ~2,974개 실기체 G1 에피소드와 당신의 힘 주석 데모 수백 개로 파인튜닝하되, **CC-BY-NC인 GraspVLA 가중치는 절대 쓰지 마십시오.** Mac에서는 MuJoCo로 기구학·IK·인터페이스 정확성을 다루되, **추론은 이더넷 너머 Mac이 아니라 로봇 자체 AGX Orin에서** 실행하십시오 — SDK에 macOS 빌드가 없어 Mac은 어차피 로봇과 대화할 수 없습니다. 학습된 Model 2는 **해석적 WBC가 실패하는 지점을 실증할 수 있을 때에만** 재도입하십시오 — 가장 유력한 후보는 **비전 조건부 장애물 회피**입니다. `GalbotMotion`은 벤더 자신의 인정으로 실시간 장애물 인지가 없기 때문입니다. 그리고 나중에 동일 인터페이스에서 학습된 Model 2를 스왑할 수 있도록 **Model 1의 출력 계약을 손당 8개 포즈로 고정해 두십시오.**
 
-- **Arm control loop rate and WBC servo rate** — the single biggest gap. No number exists anywhere.
-- **End-to-end latency** from an external PC to arm motion.
-- **`*_PVT_BYPASS_CTRL` semantics** — whether "bypass" unlocks torque or gain scheduling. Undocumented; enum names are the only evidence.
-- **`SingoriXTarget` field list** — the deepest exposed control channel; capabilities unknown.
-- **F/T sensor datasheet**: make, model, range, resolution, noise floor, sample rate, overload limit, mounting frame, and **whether readings are gravity/payload-compensated**.
-- **Head camera**: model, native resolution, FOV, stereo baseline, and **the extrinsic to `head_link2`** — the load-bearing number for any head-frame design. Also whether the head produces depth onboard (manual says stereo RGB; MobileH2R says "depth camera" — direct conflict).
-- **Whether the SDK can lock/freeze the neck** during manipulation.
-- **Which generation ships** (Charlie / Foxtrot / Golf / `G1_V2.2B`) and therefore which asset matches your hardware — joint counts differ between them.
-- **Which end effector ships by default, and its handedness** — three sources, three different answers.
-- **Whether F/T is universal across all G1 units** (SDK enum is variant-named `GalbotOneFoxtrotSensor`).
-- **Arm repeatability.** No figure exists. ⚠️ The widely-quoted "六自由度操作精度误差小于0.5毫米" is a result from the **Open6DOR simulation benchmark**, not a mechanical repeatability spec. **Do not treat 0.5 mm as arm repeatability.**
-- **Arm joint velocity / acceleration / torque hardware limits.** The URDF's uniform 1.5 rad/s looks like a placeholder.
-- **Safety certification** — no ISO 10218, ISO 13849 PL, ISO/TS 15066, TÜV or CE found in any source.
-- **TM01 leader-arm price and whether it can be bought separately**; G1 lead time; non-China purchase and export terms.
+### 1주차 단일 측정
 
-**Likely obtainable only under NDA or from a sales contact:** F/T datasheet and compensation semantics; head-camera extrinsic and model; the true control loop rate and real-time guarantees; `PVT_BYPASS` semantics; safety certification status; generation/EE configuration of your specific unit; commercial licensing terms for GraspVLA / GroceryVLA / AstraBrain.
+**`set_joint_commands`의 폐루프 명령 대역폭과 종단간 지연을, 로봇 내장 HPU에서와 외부 호스트에서 같은 세션에 측정하십시오.**
 
-**One caution the research earned the hard way:** third-party English specs for the G1 are unusable. Circulating claims of 47 DoF, a 12-DoF dexterous hand, 85 kg, 10 h battery, "no LiDAR — navigates purely from vision," and "tactile sensors in the hands" all contradict the official manual (21 articulated joints excluding chassis/EE, 92.5 kg, 8 h, 3D LiDAR ×1, and **zero tactile enums in the SDK**). Build against `developer.galbot.com`, the GalbotSDK source, and the Apache-2.0 description repo only — all three are public and unusually complete, so the usual worry about Chinese commercial robots being sales-gated genuinely does not apply here.
+**방법:** 한 팔 관절(`left_arm_joint4`)에 작은 위치 델타를 스트리밍하며 `JointState.timestamp_ns`, `position`, `effort`를 로깅합니다. 두 부분: **(1)** 명령이 드롭되거나 움직임이 눈에 띄게 불연속해질 때까지 명령 레이트를 올립니다 — 그것이 천장입니다. **(2)** 스윕 사인(±2°, 0.5→10 Hz)을 주입해 측정 응답의 크기와 위상을 읽어 위치 추종 루프의 실제 Bode 선도를 얻습니다.
+
+**왜 이것이고 다른 것이 아닌가:** 루프 레이트가 모든 출처에서 미문서화입니다 — 274,000자짜리 API 레퍼런스가 숫자를 한 번도 명시하지 않고, "Hz"·"frequency"·"latency"가 수치로 등장하지 않으며, SDK 자체의 `real_time_control_loop.cpp`라는 이름의 파일이 1 Hz 블로킹 데모입니다. 그런데 **하류의 모든 결정이 여기 달려 있습니다:** F/T 피드백이 의미 있는 어드미턴스 루프를 닫을 수 있는가, 액션 청킹이 맞는가 스텝 단위 제어가 맞는가, **2주파수 대뇌/소뇌 분리가 물리적으로 의미가 있기는 한가 아니면 모든 것이 하나의 ~30 Hz 모델로 붕괴하는가**, 목 운동 오차를 지연 예산이 얼마나 허용하는가(팬 30 °/s에서 지연 33 ms마다 0.6 m 도달거리 기준 ~10 mm), 그리고 오프보드 추론이 허용되는가 Orin이 필수인가. **정책 코드 한 줄 쓰기 전에 이 측정을 하십시오.**
+
+---
+
+## 미확인 — 명시적으로 표시
+
+**직접 URDF를 파싱해 해소한 것**(리서치에서는 미확인이었음): 전체 링크 트리와 토르소 분기 구조, 다리 관절이 prismatic이 아니라 revolute라는 점, 목 팬/틸트 가동범위, 0.35/0.36 m 링크를 가진 S–R–S 팔 구조, 모든 자산에 헤드 카메라가 없다는 점, MJCF에 F/T 프레임과 카메라가 없다는 점, macOS에서의 MuJoCo 성능.
+
+**여전히 미확인, 공개 출처 소진:**
+
+- **팔 제어 루프 레이트와 WBC 서보 레이트** — 가장 큰 공백. 어디에도 숫자가 없습니다.
+- **외부 PC에서 팔 운동까지의 종단간 지연.**
+- **`*_PVT_BYPASS_CTRL` semantics** — "bypass"가 토크나 게인 스케줄링을 해제하는지. 미문서화이고 enum 이름이 유일한 증거입니다.
+- **`SingoriXTarget` 필드 목록** — 노출된 가장 깊은 제어 채널이고, 능력이 미지입니다.
+- **F/T 센서 데이터시트:** 제조사, 모델, 범위, 분해능, 노이즈 플로어, 샘플 레이트, 과부하 한계, 마운팅 프레임, 그리고 **측정값이 중력/페이로드 보상되는지 여부.**
+- **헤드 카메라:** 모델, 네이티브 해상도, FOV, 스테레오 베이스라인, 그리고 **`head_link2`에 대한 외부 파라미터** — 모든 헤드 프레임 설계의 핵심 수치. 또한 헤드가 온보드에서 깊이를 생성하는지(매뉴얼은 스테레오 RGB, MobileH2R는 "depth camera" — 직접 충돌).
+- **SDK가 조작 중 목을 락/고정할 수 있는지.**
+- **어느 세대가 출하되는지**(Charlie / Foxtrot / Golf / `G1_V2.2B`), 따라서 어느 자산이 당신 하드웨어에 맞는지 — 세대 간 관절 수가 다릅니다.
+- **어느 엔드이펙터가 기본 출하되고 좌우가 어떻게 되는지** — 출처 3개, 답 3개.
+- **F/T가 모든 G1 유닛에 보편적인지**(SDK enum이 변종 특정 이름 `GalbotOneFoxtrotSensor`).
+- **팔 반복정밀도.** 수치가 존재하지 않습니다. ⚠️ 널리 인용되는 "六自由度操作精度误差小于0.5毫米"는 **Open6DOR 시뮬레이션 벤치마크** 결과이지 기계적 반복정밀도 스펙이 아닙니다. **0.5 mm를 팔 반복정밀도로 취급하지 마십시오.**
+- **팔 관절 속도/가속도/토크 하드웨어 한계.** URDF의 균일한 1.5 rad/s는 플레이스홀더로 보입니다.
+- **안전 인증** — ISO 10218, ISO 13849 PL, ISO/TS 15066, TÜV, CE를 어떤 출처에서도 찾지 못했습니다.
+- **TM01 리더 암 가격과 별도 구매 가능 여부**, G1 리드타임, 중국 외 구매 및 수출 조건.
+
+**아마 NDA나 영업 담당을 통해서만 얻을 수 있는 것:** F/T 데이터시트와 보상 semantics, 헤드 카메라 외부 파라미터와 모델, 진짜 제어 루프 레이트와 실시간 보장, `PVT_BYPASS` semantics, 안전 인증 상태, 당신 특정 유닛의 세대/EE 구성, GraspVLA / GroceryVLA / AstraBrain의 상업 라이선스 조건.
+
+**리서치가 힘들게 배운 주의사항 하나:** G1에 대한 3자 영어 스펙은 사용 불가입니다. 유통되는 주장 — 47 DoF, 12-DoF 다지 핸드, 85 kg, 배터리 10시간, "LiDAR 없음 — 순수 비전 항법", "손에 촉각 센서" — 가 전부 공식 매뉴얼과 모순됩니다(섀시/EE 제외 관절 21개, 92.5 kg, 8시간, 3D LiDAR ×1, **SDK에 촉각 enum 0개**). `developer.galbot.com`, GalbotSDK 소스, Apache-2.0 description 레포만 근거로 삼으십시오 — 셋 다 공개돼 있고 이례적으로 완전하므로, 중국 상업용 로봇이 영업 게이트에 막혀 있다는 통상의 우려가 여기서는 실제로 적용되지 않습니다.
