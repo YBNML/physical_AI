@@ -1,0 +1,2258 @@
+{
+ "leg_joint": {
+  "type": "fixed",
+  "parent": "omni_chassis_leg_mount_link",
+  "child": "leg_base_link",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "leg_joint1": {
+  "type": "revolute",
+  "parent": "leg_base_link",
+  "child": "leg_link1",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   1.5707963267948966,
+   -0.385,
+   3.141592653589793
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": 0.0,
+   "upper": 0.9374,
+   "effort": 169.0,
+   "velocity": 1.0
+  }
+ },
+ "leg_joint2": {
+  "type": "revolute",
+  "parent": "leg_link1",
+  "child": "leg_link2",
+  "xyz": [
+   0.45,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   3.141592653589793,
+   0.0,
+   2.7566
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": 0.0,
+   "upper": 2.5847,
+   "effort": 169.0,
+   "velocity": 1.0
+  }
+ },
+ "leg_joint3": {
+  "type": "revolute",
+  "parent": "leg_link2",
+  "child": "leg_link3",
+  "xyz": [
+   0.39,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   3.141592653589793,
+   0.0,
+   3.141592653589793
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": 0.0,
+   "upper": 2.3262,
+   "effort": 84.0,
+   "velocity": 1.0
+  }
+ },
+ "leg_joint4": {
+  "type": "revolute",
+  "parent": "leg_link3",
+  "child": "leg_link4",
+  "xyz": [
+   0.0,
+   0.224,
+   0.0
+  ],
+  "rpy": [
+   -1.5707963267948966,
+   -1.5707963267948966,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -1.5906,
+   "upper": 1.5906,
+   "effort": 30.0,
+   "velocity": 1.0
+  }
+ },
+ "leg_joint5": {
+  "type": "revolute",
+  "parent": "leg_link4",
+  "child": "leg_link5",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   1.5707963267948966,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -0.1645,
+   "upper": 0.1645,
+   "effort": 30.0,
+   "velocity": 1.0
+  }
+ },
+ "leg_end_effector_mount_joint": {
+  "type": "fixed",
+  "parent": "leg_link5",
+  "child": "leg_end_effector_mount_link",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "torso_joint": {
+  "type": "fixed",
+  "parent": "leg_end_effector_mount_link",
+  "child": "torso_base_link",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "base_footprint_joint": {
+  "type": "fixed",
+  "parent": "base_footprint",
+  "child": "base_link",
+  "xyz": [
+   0.0,
+   0.0,
+   0.028166
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "omni_chassis_joint": {
+  "type": "fixed",
+  "parent": "base_link",
+  "child": "omni_chassis_base_link",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "omni_chassis_leg_mount_joint": {
+  "type": "fixed",
+  "parent": "omni_chassis_base_link",
+  "child": "omni_chassis_leg_mount_link",
+  "xyz": [
+   0.134,
+   0.0,
+   0.1325
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "wheel_1_passive_0_joint": {
+  "type": "continuous",
+  "parent": "wheel_1",
+  "child": "wheel_1_passive_0",
+  "xyz": [
+   0.0,
+   0.025,
+   0.0
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_1_passive_1_joint": {
+  "type": "continuous",
+  "parent": "wheel_1",
+  "child": "wheel_1_passive_1",
+  "xyz": [
+   0.0,
+   0.02022542485937369,
+   0.014694631307311828
+  ],
+  "rpy": [
+   0.6283185307179586,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_1_passive_2_joint": {
+  "type": "continuous",
+  "parent": "wheel_1",
+  "child": "wheel_1_passive_2",
+  "xyz": [
+   0.0,
+   0.007725424859373687,
+   0.02377641290737884
+  ],
+  "rpy": [
+   1.2566370614359172,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_1_passive_3_joint": {
+  "type": "continuous",
+  "parent": "wheel_1",
+  "child": "wheel_1_passive_3",
+  "xyz": [
+   0.0,
+   -0.007725424859373684,
+   0.023776412907378842
+  ],
+  "rpy": [
+   1.8849555921538759,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_1_passive_4_joint": {
+  "type": "continuous",
+  "parent": "wheel_1",
+  "child": "wheel_1_passive_4",
+  "xyz": [
+   0.0,
+   -0.020225424859373686,
+   0.014694631307311832
+  ],
+  "rpy": [
+   2.5132741228718345,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_1_passive_5_joint": {
+  "type": "continuous",
+  "parent": "wheel_1",
+  "child": "wheel_1_passive_5",
+  "xyz": [
+   0.0,
+   -0.025,
+   3.061616997868383e-18
+  ],
+  "rpy": [
+   3.141592653589793,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_1_passive_6_joint": {
+  "type": "continuous",
+  "parent": "wheel_1",
+  "child": "wheel_1_passive_6",
+  "xyz": [
+   0.0,
+   -0.02022542485937369,
+   -0.014694631307311827
+  ],
+  "rpy": [
+   3.7699111843077517,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_1_passive_7_joint": {
+  "type": "continuous",
+  "parent": "wheel_1",
+  "child": "wheel_1_passive_7",
+  "xyz": [
+   0.0,
+   -0.007725424859373689,
+   -0.02377641290737884
+  ],
+  "rpy": [
+   4.39822971502571,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_1_passive_8_joint": {
+  "type": "continuous",
+  "parent": "wheel_1",
+  "child": "wheel_1_passive_8",
+  "xyz": [
+   0.0,
+   0.007725424859373681,
+   -0.023776412907378842
+  ],
+  "rpy": [
+   5.026548245743669,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_1_passive_9_joint": {
+  "type": "continuous",
+  "parent": "wheel_1",
+  "child": "wheel_1_passive_9",
+  "xyz": [
+   0.0,
+   0.020225424859373686,
+   -0.014694631307311835
+  ],
+  "rpy": [
+   5.654866776461628,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_2_passive_0_joint": {
+  "type": "continuous",
+  "parent": "wheel_2",
+  "child": "wheel_2_passive_0",
+  "xyz": [
+   0.0,
+   0.025,
+   0.0
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_2_passive_1_joint": {
+  "type": "continuous",
+  "parent": "wheel_2",
+  "child": "wheel_2_passive_1",
+  "xyz": [
+   0.0,
+   0.02022542485937369,
+   0.014694631307311828
+  ],
+  "rpy": [
+   0.6283185307179586,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_2_passive_2_joint": {
+  "type": "continuous",
+  "parent": "wheel_2",
+  "child": "wheel_2_passive_2",
+  "xyz": [
+   0.0,
+   0.007725424859373687,
+   0.02377641290737884
+  ],
+  "rpy": [
+   1.2566370614359172,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_2_passive_3_joint": {
+  "type": "continuous",
+  "parent": "wheel_2",
+  "child": "wheel_2_passive_3",
+  "xyz": [
+   0.0,
+   -0.007725424859373684,
+   0.023776412907378842
+  ],
+  "rpy": [
+   1.8849555921538759,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_2_passive_4_joint": {
+  "type": "continuous",
+  "parent": "wheel_2",
+  "child": "wheel_2_passive_4",
+  "xyz": [
+   0.0,
+   -0.020225424859373686,
+   0.014694631307311832
+  ],
+  "rpy": [
+   2.5132741228718345,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_2_passive_5_joint": {
+  "type": "continuous",
+  "parent": "wheel_2",
+  "child": "wheel_2_passive_5",
+  "xyz": [
+   0.0,
+   -0.025,
+   3.061616997868383e-18
+  ],
+  "rpy": [
+   3.141592653589793,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_2_passive_6_joint": {
+  "type": "continuous",
+  "parent": "wheel_2",
+  "child": "wheel_2_passive_6",
+  "xyz": [
+   0.0,
+   -0.02022542485937369,
+   -0.014694631307311827
+  ],
+  "rpy": [
+   3.7699111843077517,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_2_passive_7_joint": {
+  "type": "continuous",
+  "parent": "wheel_2",
+  "child": "wheel_2_passive_7",
+  "xyz": [
+   0.0,
+   -0.007725424859373689,
+   -0.02377641290737884
+  ],
+  "rpy": [
+   4.39822971502571,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_2_passive_8_joint": {
+  "type": "continuous",
+  "parent": "wheel_2",
+  "child": "wheel_2_passive_8",
+  "xyz": [
+   0.0,
+   0.007725424859373681,
+   -0.023776412907378842
+  ],
+  "rpy": [
+   5.026548245743669,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_2_passive_9_joint": {
+  "type": "continuous",
+  "parent": "wheel_2",
+  "child": "wheel_2_passive_9",
+  "xyz": [
+   0.0,
+   0.020225424859373686,
+   -0.014694631307311835
+  ],
+  "rpy": [
+   5.654866776461628,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_3_passive_0_joint": {
+  "type": "continuous",
+  "parent": "wheel_3",
+  "child": "wheel_3_passive_0",
+  "xyz": [
+   0.0,
+   0.025,
+   0.0
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_3_passive_1_joint": {
+  "type": "continuous",
+  "parent": "wheel_3",
+  "child": "wheel_3_passive_1",
+  "xyz": [
+   0.0,
+   0.02022542485937369,
+   0.014694631307311828
+  ],
+  "rpy": [
+   0.6283185307179586,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_3_passive_2_joint": {
+  "type": "continuous",
+  "parent": "wheel_3",
+  "child": "wheel_3_passive_2",
+  "xyz": [
+   0.0,
+   0.007725424859373687,
+   0.02377641290737884
+  ],
+  "rpy": [
+   1.2566370614359172,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_3_passive_3_joint": {
+  "type": "continuous",
+  "parent": "wheel_3",
+  "child": "wheel_3_passive_3",
+  "xyz": [
+   0.0,
+   -0.007725424859373684,
+   0.023776412907378842
+  ],
+  "rpy": [
+   1.8849555921538759,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_3_passive_4_joint": {
+  "type": "continuous",
+  "parent": "wheel_3",
+  "child": "wheel_3_passive_4",
+  "xyz": [
+   0.0,
+   -0.020225424859373686,
+   0.014694631307311832
+  ],
+  "rpy": [
+   2.5132741228718345,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_3_passive_5_joint": {
+  "type": "continuous",
+  "parent": "wheel_3",
+  "child": "wheel_3_passive_5",
+  "xyz": [
+   0.0,
+   -0.025,
+   3.061616997868383e-18
+  ],
+  "rpy": [
+   3.141592653589793,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_3_passive_6_joint": {
+  "type": "continuous",
+  "parent": "wheel_3",
+  "child": "wheel_3_passive_6",
+  "xyz": [
+   0.0,
+   -0.02022542485937369,
+   -0.014694631307311827
+  ],
+  "rpy": [
+   3.7699111843077517,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_3_passive_7_joint": {
+  "type": "continuous",
+  "parent": "wheel_3",
+  "child": "wheel_3_passive_7",
+  "xyz": [
+   0.0,
+   -0.007725424859373689,
+   -0.02377641290737884
+  ],
+  "rpy": [
+   4.39822971502571,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_3_passive_8_joint": {
+  "type": "continuous",
+  "parent": "wheel_3",
+  "child": "wheel_3_passive_8",
+  "xyz": [
+   0.0,
+   0.007725424859373681,
+   -0.023776412907378842
+  ],
+  "rpy": [
+   5.026548245743669,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_3_passive_9_joint": {
+  "type": "continuous",
+  "parent": "wheel_3",
+  "child": "wheel_3_passive_9",
+  "xyz": [
+   0.0,
+   0.020225424859373686,
+   -0.014694631307311835
+  ],
+  "rpy": [
+   5.654866776461628,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_4_passive_0_joint": {
+  "type": "continuous",
+  "parent": "wheel_4",
+  "child": "wheel_4_passive_0",
+  "xyz": [
+   0.0,
+   0.025,
+   0.0
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_4_passive_1_joint": {
+  "type": "continuous",
+  "parent": "wheel_4",
+  "child": "wheel_4_passive_1",
+  "xyz": [
+   0.0,
+   0.02022542485937369,
+   0.014694631307311828
+  ],
+  "rpy": [
+   0.6283185307179586,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_4_passive_2_joint": {
+  "type": "continuous",
+  "parent": "wheel_4",
+  "child": "wheel_4_passive_2",
+  "xyz": [
+   0.0,
+   0.007725424859373687,
+   0.02377641290737884
+  ],
+  "rpy": [
+   1.2566370614359172,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_4_passive_3_joint": {
+  "type": "continuous",
+  "parent": "wheel_4",
+  "child": "wheel_4_passive_3",
+  "xyz": [
+   0.0,
+   -0.007725424859373684,
+   0.023776412907378842
+  ],
+  "rpy": [
+   1.8849555921538759,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_4_passive_4_joint": {
+  "type": "continuous",
+  "parent": "wheel_4",
+  "child": "wheel_4_passive_4",
+  "xyz": [
+   0.0,
+   -0.020225424859373686,
+   0.014694631307311832
+  ],
+  "rpy": [
+   2.5132741228718345,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_4_passive_5_joint": {
+  "type": "continuous",
+  "parent": "wheel_4",
+  "child": "wheel_4_passive_5",
+  "xyz": [
+   0.0,
+   -0.025,
+   3.061616997868383e-18
+  ],
+  "rpy": [
+   3.141592653589793,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_4_passive_6_joint": {
+  "type": "continuous",
+  "parent": "wheel_4",
+  "child": "wheel_4_passive_6",
+  "xyz": [
+   0.0,
+   -0.02022542485937369,
+   -0.014694631307311827
+  ],
+  "rpy": [
+   3.7699111843077517,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_4_passive_7_joint": {
+  "type": "continuous",
+  "parent": "wheel_4",
+  "child": "wheel_4_passive_7",
+  "xyz": [
+   0.0,
+   -0.007725424859373689,
+   -0.02377641290737884
+  ],
+  "rpy": [
+   4.39822971502571,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_4_passive_8_joint": {
+  "type": "continuous",
+  "parent": "wheel_4",
+  "child": "wheel_4_passive_8",
+  "xyz": [
+   0.0,
+   0.007725424859373681,
+   -0.023776412907378842
+  ],
+  "rpy": [
+   5.026548245743669,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel_4_passive_9_joint": {
+  "type": "continuous",
+  "parent": "wheel_4",
+  "child": "wheel_4_passive_9",
+  "xyz": [
+   0.0,
+   0.020225424859373686,
+   -0.014694631307311835
+  ],
+  "rpy": [
+   5.654866776461628,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": null
+ },
+ "wheel1_joint": {
+  "type": "continuous",
+  "parent": "omni_chassis_base_link",
+  "child": "wheel_1",
+  "xyz": [
+   0.176493,
+   0.176493,
+   0.071834
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   -2.356194490192345
+  ],
+  "axis": [
+   1.0,
+   0.0,
+   0.0
+  ],
+  "limit": null
+ },
+ "wheel2_joint": {
+  "type": "continuous",
+  "parent": "omni_chassis_base_link",
+  "child": "wheel_2",
+  "xyz": [
+   -0.176493,
+   0.176493,
+   0.071834
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   -0.7853981633974483
+  ],
+  "axis": [
+   1.0,
+   0.0,
+   0.0
+  ],
+  "limit": null
+ },
+ "wheel3_joint": {
+  "type": "continuous",
+  "parent": "omni_chassis_base_link",
+  "child": "wheel_3",
+  "xyz": [
+   -0.176493,
+   -0.176493,
+   0.071834
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   0.7853981633974483
+  ],
+  "axis": [
+   1.0,
+   0.0,
+   0.0
+  ],
+  "limit": null
+ },
+ "wheel4_joint": {
+  "type": "continuous",
+  "parent": "omni_chassis_base_link",
+  "child": "wheel_4",
+  "xyz": [
+   0.176493,
+   -0.176493,
+   0.071834
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   2.356194490192345
+  ],
+  "axis": [
+   1.0,
+   0.0,
+   0.0
+  ],
+  "limit": null
+ },
+ "chassis_lidar_joint": {
+  "type": "fixed",
+  "parent": "omni_chassis_base_link",
+  "child": "chassis_lidar",
+  "xyz": [
+   0.235,
+   0.0,
+   0.2144
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "torso_head_mount_joint": {
+  "type": "fixed",
+  "parent": "torso_base_link",
+  "child": "torso_head_mount_link",
+  "xyz": [
+   0.0,
+   0.37711,
+   0.0
+  ],
+  "rpy": [
+   -1.5707963267948966,
+   -1.5707963267948966,
+   0.0
+  ],
+  "axis": [
+   0,
+   0,
+   0
+  ],
+  "limit": null
+ },
+ "head_joint": {
+  "type": "fixed",
+  "parent": "torso_head_mount_link",
+  "child": "head_base_link",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "head_joint1": {
+  "type": "revolute",
+  "parent": "head_base_link",
+  "child": "head_link1",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -1.5208,
+   "upper": 1.5208,
+   "effort": 4.0,
+   "velocity": 1.5
+  }
+ },
+ "head_joint2": {
+  "type": "revolute",
+  "parent": "head_link1",
+  "child": "head_link2",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   -1.5707963267948966,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -0.2143461,
+   "upper": 0.4935988,
+   "effort": 4.0,
+   "velocity": 1.5
+  }
+ },
+ "head_end_effector_mount_joint": {
+  "type": "fixed",
+  "parent": "head_link2",
+  "child": "head_end_effector_mount_link",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": [
+   0,
+   0,
+   0
+  ],
+  "limit": null
+ },
+ "torso_left_arm_mount_joint": {
+  "type": "fixed",
+  "parent": "torso_base_link",
+  "child": "torso_left_arm_mount_link",
+  "xyz": [
+   0.20843,
+   0.172,
+   0.0
+  ],
+  "rpy": [
+   0.0,
+   1.5707963267948966,
+   0.0
+  ],
+  "axis": [
+   0,
+   0,
+   0
+  ],
+  "limit": null
+ },
+ "torso_right_arm_mount_joint": {
+  "type": "fixed",
+  "parent": "torso_base_link",
+  "child": "torso_right_arm_mount_link",
+  "xyz": [
+   -0.20843,
+   0.172,
+   0.0
+  ],
+  "rpy": [
+   3.141592653589793,
+   1.5707963267948966,
+   0.0
+  ],
+  "axis": [
+   0,
+   0,
+   0
+  ],
+  "limit": null
+ },
+ "right_arm_joint": {
+  "type": "fixed",
+  "parent": "torso_right_arm_mount_link",
+  "child": "right_arm_base_link",
+  "xyz": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "right_arm_joint1": {
+  "type": "revolute",
+  "parent": "right_arm_base_link",
+  "child": "right_arm_link1",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   -0.523598775598286
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -3.00432619,
+   "upper": 3.00432619,
+   "effort": 60.0,
+   "velocity": 1.5
+  }
+ },
+ "right_arm_joint2": {
+  "type": "revolute",
+  "parent": "right_arm_link1",
+  "child": "right_arm_link2",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   -1.5707963267949,
+   0.0,
+   3.14159265358979
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -1.608062789,
+   "upper": 1.608062789,
+   "effort": 60.0,
+   "velocity": 1.5
+  }
+ },
+ "right_arm_joint3": {
+  "type": "revolute",
+  "parent": "right_arm_link2",
+  "child": "right_arm_link3",
+  "xyz": [
+   0.0,
+   -0.35,
+   0.0
+  ],
+  "rpy": [
+   -1.5707963267949,
+   1.04719755119629,
+   -3.14159265358979
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -2.916972222,
+   "upper": 2.916972222,
+   "effort": 30.0,
+   "velocity": 1.5
+  }
+ },
+ "right_arm_joint4": {
+  "type": "revolute",
+  "parent": "right_arm_link3",
+  "child": "right_arm_link4",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   -1.57079632679459,
+   0.0,
+   3.14159265358979
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -1.869862177,
+   "upper": 2.5679938779914946,
+   "effort": 30.0,
+   "velocity": 1.5
+  }
+ },
+ "right_arm_joint5": {
+  "type": "revolute",
+  "parent": "right_arm_link4",
+  "child": "right_arm_link5",
+  "xyz": [
+   0.0,
+   -0.36,
+   0.0
+  ],
+  "rpy": [
+   -1.5707963267949,
+   0.0,
+   3.1415926535898
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -2.916972222,
+   "upper": 2.916972222,
+   "effort": 10.0,
+   "velocity": 1.5
+  }
+ },
+ "right_arm_joint6": {
+  "type": "revolute",
+  "parent": "right_arm_link5",
+  "child": "right_arm_link6",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   1.5707963267949,
+   1.5707963267949,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -0.7353981633974483,
+   "upper": 0.8226646259971648,
+   "effort": 10.0,
+   "velocity": 1.5
+  }
+ },
+ "right_arm_joint7": {
+  "type": "revolute",
+  "parent": "right_arm_link6",
+  "child": "right_arm_link7",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   -1.5707963267949,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -1.538202778,
+   "upper": 1.538202778,
+   "effort": 10.0,
+   "velocity": 1.5
+  }
+ },
+ "right_arm_end_effector_mount_joint": {
+  "type": "fixed",
+  "parent": "right_arm_link7",
+  "child": "right_arm_end_effector_mount_link",
+  "xyz": [
+   -0.10926,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   3.141592653589793,
+   0.0,
+   3.141592653589793
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "limit": null
+ },
+ "right_arm_camera_stand_joint": {
+  "type": "fixed",
+  "parent": "right_arm_link7",
+  "child": "right_arm_wrist_camera_stand",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "right_arm_camera_joint": {
+  "type": "fixed",
+  "parent": "right_arm_wrist_camera_stand",
+  "child": "right_wrist_camera_link",
+  "xyz": [
+   -0.0822,
+   0.0,
+   -0.06842
+  ],
+  "rpy": [
+   0.0,
+   1.4807963267948965,
+   3.141592653589793
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "right_gripper_mount_joint": {
+  "type": "fixed",
+  "parent": "right_arm_end_effector_mount_link",
+  "child": "right_gripper_flange_link",
+  "xyz": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   1.5707963267948966,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "limit": null
+ },
+ "right_gripper_base_joint": {
+  "type": "fixed",
+  "parent": "right_gripper_flange_link",
+  "child": "right_gripper_base_link",
+  "xyz": [
+   0.0065,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "right_gripper_joint": {
+  "type": "revolute",
+  "parent": "right_gripper_base_link",
+  "child": "right_gripper_r_knuckle_link",
+  "xyz": [
+   0.0745,
+   0.0,
+   0.0385
+  ],
+  "rpy": [
+   1.5707963267948966,
+   -1.2465,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   -1.0
+  ],
+  "limit": {
+   "lower": 0.0,
+   "upper": 1.703,
+   "effort": 50.0,
+   "velocity": 0.5
+  }
+ },
+ "right_gripper_r_inner_knuckle_joint": {
+  "type": "revolute",
+  "parent": "right_gripper_base_link",
+  "child": "right_gripper_r_inner_knuckle_link",
+  "xyz": [
+   0.079,
+   0.0,
+   0.026
+  ],
+  "rpy": [
+   1.5707963267948966,
+   -1.2465,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -3.13,
+   "upper": 3.13,
+   "effort": 1000.0,
+   "velocity": 2.0
+  }
+ },
+ "right_gripper_r_finger_joint": {
+  "type": "revolute",
+  "parent": "right_gripper_r_inner_knuckle_link",
+  "child": "right_gripper_r_finger_link",
+  "xyz": [
+   0.045,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   -1.2465
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -3.13,
+   "upper": 3.13,
+   "effort": 1000.0,
+   "velocity": 2.0
+  }
+ },
+ "right_gripper_l_knuckle_joint": {
+  "type": "revolute",
+  "parent": "right_gripper_base_link",
+  "child": "right_gripper_l_knuckle_link",
+  "xyz": [
+   0.0745,
+   0.0,
+   -0.0385
+  ],
+  "rpy": [
+   1.5707963267948966,
+   1.2465,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -3.13,
+   "upper": 3.13,
+   "effort": 50.0,
+   "velocity": 0.5
+  }
+ },
+ "right_gripper_l_inner_knuckle_joint": {
+  "type": "revolute",
+  "parent": "right_gripper_base_link",
+  "child": "right_gripper_l_inner_knuckle_link",
+  "xyz": [
+   0.079,
+   0.0,
+   -0.026
+  ],
+  "rpy": [
+   1.5707963267948966,
+   1.2465,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -3.13,
+   "upper": 3.13,
+   "effort": 1000.0,
+   "velocity": 2.0
+  }
+ },
+ "right_gripper_l_finger_joint": {
+  "type": "revolute",
+  "parent": "right_gripper_l_inner_knuckle_link",
+  "child": "right_gripper_l_finger_link",
+  "xyz": [
+   0.045,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   1.2465
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -3.13,
+   "upper": 3.13,
+   "effort": 1000.0,
+   "velocity": 2.0
+  }
+ },
+ "right_gripper_tcp_joint": {
+  "type": "fixed",
+  "parent": "right_gripper_base_link",
+  "child": "right_gripper_tcp_link",
+  "xyz": [
+   0.13996,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   1.5707963267948966,
+   0.0,
+   0.0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "left_arm_joint": {
+  "type": "fixed",
+  "parent": "torso_left_arm_mount_link",
+  "child": "left_arm_base_link",
+  "xyz": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "left_arm_joint1": {
+  "type": "revolute",
+  "parent": "left_arm_base_link",
+  "child": "left_arm_link1",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   0.523598775598286
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -3.00432619,
+   "upper": 3.00432619,
+   "effort": 60.0,
+   "velocity": 1.5
+  }
+ },
+ "left_arm_joint2": {
+  "type": "revolute",
+  "parent": "left_arm_link1",
+  "child": "left_arm_link2",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   1.5707963267949,
+   0.0,
+   3.14159265358979
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -1.608062789,
+   "upper": 1.608062789,
+   "effort": 60.0,
+   "velocity": 1.5
+  }
+ },
+ "left_arm_joint3": {
+  "type": "revolute",
+  "parent": "left_arm_link2",
+  "child": "left_arm_link3",
+  "xyz": [
+   0.0,
+   0.35,
+   0.0
+  ],
+  "rpy": [
+   1.5707963267949,
+   1.04719755119629,
+   -3.14159265358979
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -2.916972222,
+   "upper": 2.916972222,
+   "effort": 30.0,
+   "velocity": 1.5
+  }
+ },
+ "left_arm_joint4": {
+  "type": "revolute",
+  "parent": "left_arm_link3",
+  "child": "left_arm_link4",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   1.57079632679459,
+   0.0,
+   3.14159265358979
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -2.5679938779914946,
+   "upper": 1.869862177,
+   "effort": 30.0,
+   "velocity": 1.5
+  }
+ },
+ "left_arm_joint5": {
+  "type": "revolute",
+  "parent": "left_arm_link4",
+  "child": "left_arm_link5",
+  "xyz": [
+   0.0,
+   0.36,
+   0.0
+  ],
+  "rpy": [
+   -1.5707963267949,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -2.916972222,
+   "upper": 2.916972222,
+   "effort": 10.0,
+   "velocity": 1.5
+  }
+ },
+ "left_arm_joint6": {
+  "type": "revolute",
+  "parent": "left_arm_link5",
+  "child": "left_arm_link6",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   1.5707963267949,
+   1.5707963267949,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -0.8226646259971648,
+   "upper": 0.7353981633974483,
+   "effort": 10.0,
+   "velocity": 1.5
+  }
+ },
+ "left_arm_joint7": {
+  "type": "revolute",
+  "parent": "left_arm_link6",
+  "child": "left_arm_link7",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   1.5707963267949,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -1.538202778,
+   "upper": 1.538202778,
+   "effort": 10.0,
+   "velocity": 1.5
+  }
+ },
+ "left_arm_end_effector_mount_joint": {
+  "type": "fixed",
+  "parent": "left_arm_link7",
+  "child": "left_arm_end_effector_mount_link",
+  "xyz": [
+   -0.10926,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   3.141592653589793,
+   0.0,
+   3.141592653589793
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "limit": null
+ },
+ "left_arm_camera_stand_joint": {
+  "type": "fixed",
+  "parent": "left_arm_link7",
+  "child": "left_arm_wrist_camera_stand",
+  "xyz": [
+   0,
+   0,
+   0
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "left_arm_camera_joint": {
+  "type": "fixed",
+  "parent": "left_arm_wrist_camera_stand",
+  "child": "left_wrist_camera_link",
+  "xyz": [
+   -0.0822,
+   0.0,
+   -0.06842
+  ],
+  "rpy": [
+   0.0,
+   1.4807963267948965,
+   3.141592653589793
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "left_gripper_mount_joint": {
+  "type": "fixed",
+  "parent": "left_arm_end_effector_mount_link",
+  "child": "left_gripper_flange_link",
+  "xyz": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   1.5707963267948966,
+   0.0,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   0.0
+  ],
+  "limit": null
+ },
+ "left_gripper_base_joint": {
+  "type": "fixed",
+  "parent": "left_gripper_flange_link",
+  "child": "left_gripper_base_link",
+  "xyz": [
+   0.0065,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   0,
+   0,
+   0
+  ],
+  "axis": null,
+  "limit": null
+ },
+ "left_gripper_joint": {
+  "type": "revolute",
+  "parent": "left_gripper_base_link",
+  "child": "left_gripper_r_knuckle_link",
+  "xyz": [
+   0.0745,
+   0.0,
+   0.0385
+  ],
+  "rpy": [
+   1.5707963267948966,
+   -1.2465,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   -1.0
+  ],
+  "limit": {
+   "lower": 0.0,
+   "upper": 1.703,
+   "effort": 50.0,
+   "velocity": 0.5
+  }
+ },
+ "left_gripper_r_inner_knuckle_joint": {
+  "type": "revolute",
+  "parent": "left_gripper_base_link",
+  "child": "left_gripper_r_inner_knuckle_link",
+  "xyz": [
+   0.079,
+   0.0,
+   0.026
+  ],
+  "rpy": [
+   1.5707963267948966,
+   -1.2465,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -3.13,
+   "upper": 3.13,
+   "effort": 1000.0,
+   "velocity": 2.0
+  }
+ },
+ "left_gripper_r_finger_joint": {
+  "type": "revolute",
+  "parent": "left_gripper_r_inner_knuckle_link",
+  "child": "left_gripper_r_finger_link",
+  "xyz": [
+   0.045,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   -1.2465
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -3.13,
+   "upper": 3.13,
+   "effort": 1000.0,
+   "velocity": 2.0
+  }
+ },
+ "left_gripper_l_knuckle_joint": {
+  "type": "revolute",
+  "parent": "left_gripper_base_link",
+  "child": "left_gripper_l_knuckle_link",
+  "xyz": [
+   0.0745,
+   0.0,
+   -0.0385
+  ],
+  "rpy": [
+   1.5707963267948966,
+   1.2465,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -3.13,
+   "upper": 3.13,
+   "effort": 50.0,
+   "velocity": 0.5
+  }
+ },
+ "left_gripper_l_inner_knuckle_joint": {
+  "type": "revolute",
+  "parent": "left_gripper_base_link",
+  "child": "left_gripper_l_inner_knuckle_link",
+  "xyz": [
+   0.079,
+   0.0,
+   -0.026
+  ],
+  "rpy": [
+   1.5707963267948966,
+   1.2465,
+   0.0
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -3.13,
+   "upper": 3.13,
+   "effort": 1000.0,
+   "velocity": 2.0
+  }
+ },
+ "left_gripper_l_finger_joint": {
+  "type": "revolute",
+  "parent": "left_gripper_l_inner_knuckle_link",
+  "child": "left_gripper_l_finger_link",
+  "xyz": [
+   0.045,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   0.0,
+   0.0,
+   1.2465
+  ],
+  "axis": [
+   0.0,
+   0.0,
+   1.0
+  ],
+  "limit": {
+   "lower": -3.13,
+   "upper": 3.13,
+   "effort": 1000.0,
+   "velocity": 2.0
+  }
+ },
+ "left_gripper_tcp_joint": {
+  "type": "fixed",
+  "parent": "left_gripper_base_link",
+  "child": "left_gripper_tcp_link",
+  "xyz": [
+   0.13996,
+   0.0,
+   0.0
+  ],
+  "rpy": [
+   1.5707963267948966,
+   0.0,
+   0.0
+  ],
+  "axis": null,
+  "limit": null
+ }
+}

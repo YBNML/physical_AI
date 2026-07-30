@@ -21,3 +21,11 @@ outputs/
 wandb/
 *.mcap
 *.parquet
+
+# conda / 로컬 환경
+.venv/
+*.egg-info/
+
+# 측정 결과 (기기별)
+gate1_results*.json
+results_*.json
