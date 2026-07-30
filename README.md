@@ -33,21 +33,27 @@
 
 ### 원자료 — [docs/research/](docs/research/)
 
-리서치 에이전트 32개의 산출물 (영어 원문, findings별 출처·신뢰도 표기).
+리서치 에이전트 32개의 산출물. **전부 국문화**했고, findings별 출처·신뢰도 태그(`[M]` 실측 / `[PR]` peer-reviewed / `[PP]` preprint / `[V]` 벤더 / `[I]` 추론)를 보존했습니다.
 
-| 파일 | 내용 |
-|---|---|
-| [01-synthesis-principles.md](docs/research/01-synthesis-principles.md) | 주장별 채점표 C1–C14, 선행연구 지도, 반론 O1–O13, 대안 비교 |
-| [02-empirical-plan.md](docs/research/02-empirical-plan.md) | 실험 계획 E0–E5, 대조군 사다리, 지표 정의, GO/NO-GO 표 |
-| [03-synthesis-config-specific.md](docs/research/03-synthesis-config-specific.md) | 양팔·로컬 추론·자체 텔레옵·사업화가 판정을 바꾸는 방식 |
-| [04-research-digest.md](docs/research/04-research-digest.md) | 계층형 VLA / 인터페이스 표현 / 고전 로보틱스 / 엣지 배포 |
-| [05-critiques.md](docs/research/05-critiques.md) | 적대적 비판 3렌즈 — "IK 재발명" / "정보 병목" / "시스템·안전" |
-| [06-alternatives.md](docs/research/06-alternatives.md) | 대안 아키텍처 3종 (ΔChunk / TRISYS-500 / CIR-1) |
-| [07-REVISION-01-with-ft.md](docs/research/07-REVISION-01-with-ft.md) | F/T 입력 반영 개정 — 어느 결론이 철회됐는지 |
-| [08-adversarial-recheck.md](docs/research/08-adversarial-recheck.md) | 초판 결론에 대한 적대적 재검증 |
-| [09-recheck-findings.md](docs/research/09-recheck-findings.md) | 힘 조건부 정책 · 7-DoF 중복성 · 헤드 프레임 · 누락 필드 |
-| [10-REVISION-02-galbot-g1.md](docs/research/10-REVISION-02-galbot-g1.md) | Galbot G1 확정 사실로 설계 질문 해소 |
-| [11-galbot-g1-platform-facts.md](docs/research/11-galbot-g1-platform-facts.md) | G1 플랫폼 사실 — 검증된 것 / 확인 못 한 것 |
+| 파일 | 내용 | 형태 |
+|---|---|---|
+| [01-synthesis-principles.md](docs/research/01-synthesis-principles.md) | 주장별 채점표 C1–C14, 선행연구 지도, 신경과학 분석, 반론 O1–O13, 대안 비교, 로드맵 | 전문 번역 ⚠️ |
+| [02-empirical-plan.md](docs/research/02-empirical-plan.md) | 실험 계획 E0–E5, 대조군 사다리, 지표 정의, GO/NO-GO 표 | 전문 번역 |
+| [03-synthesis-config-specific.md](docs/research/03-synthesis-config-specific.md) | 양팔·로컬 추론·자체 텔레옵·사업화가 판정을 바꾸는 방식 | 전문 번역 |
+| [04-research-digest.md](docs/research/04-research-digest.md) | 계층형 VLA / 인터페이스 표현 / 고전 로보틱스 / 엣지 배포 | 전문 번역 |
+| [05-critiques.md](docs/research/05-critiques.md) | 적대적 비판 3렌즈 — "IK 재발명" / "정보 병목" / "시스템·안전" | 국문 요약 + [원문](docs/research/05-critiques-en.md) |
+| [06-alternatives.md](docs/research/06-alternatives.md) | 대안 아키텍처 3종 상세 명세 (ΔChunk / TRISYS-500 / CIR-1) | 전문 번역 |
+| [07-REVISION-01-with-ft.md](docs/research/07-REVISION-01-with-ft.md) | **F/T 입력 반영 개정 — 어느 결론이 철회됐는지** | 전문 번역 |
+| [08-adversarial-recheck.md](docs/research/08-adversarial-recheck.md) | 초판 결론에 대한 적대적 재검증 | 전문 번역 |
+| [09-recheck-findings.md](docs/research/09-recheck-findings.md) | 힘 조건부 정책 · 7-DoF 중복성 · 헤드 프레임 · 누락 필드 · 컴퓨트 재측정 | 국문 요약 + [원문](docs/research/09-recheck-findings-en.md) |
+| [10-REVISION-02-galbot-g1.md](docs/research/10-REVISION-02-galbot-g1.md) | **Galbot G1 확정 사실로 설계 질문 해소** (URDF 직접 파싱) | 전문 번역 |
+| [11-galbot-g1-platform-facts.md](docs/research/11-galbot-g1-platform-facts.md) | G1 플랫폼 사실 — 검증된 것 / **벤더에 물어볼 미확인 목록** | 국문 요약 + [원문](docs/research/11-galbot-g1-platform-facts-en.md) |
+
+⚠️ **01번은 1라운드 종합이라 여러 헤드라인 결론이 이후 07/10에서 철회되었습니다.** 문서 상단 경고 블록과 각 지점의 각주를 확인하십시오. 최신 판정은 메인 문서와 07·10입니다.
+
+**국문 요약 + 원문 병기(05·09·11):** 이 셋은 에이전트 원시 findings 덤프(`[confidence] point / detail / NUMBERS / SRC` 반복)라 전문 번역의 실익이 낮아, 실측 수치와 미확인 목록을 보존한 국문 요약본으로 대체하고 영문 원본을 `-en.md`로 병기했습니다.
+
+**표기 기준:** 개발 현장에서 통상 영어로 쓰는 용어(closed-form, null space, wrench, chunk, ablation, baseline, admittance, staleness 등)와 고유명사·약어는 영문 그대로 두었습니다. 논문 인용문은 원문 유지 + 괄호 국역 병기.
 
 ### 벤치마크 — [docs/research/benchmarks/](docs/research/benchmarks/)
 
