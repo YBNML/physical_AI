@@ -1,0 +1,23 @@
+# 로컬/에디터
+.DS_Store
+.vscode/
+.idea/
+
+# 파이썬
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# 대용량 자산 (git에 넣지 않음)
+data/
+datasets/
+checkpoints/
+*.ckpt
+*.safetensors
+*.pt
+logs/
+outputs/
+wandb/
+*.mcap
+*.parquet
