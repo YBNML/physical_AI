@@ -33,3 +33,5 @@ __pycache__/
 experiments/e0/results/
 experiments/e0/runs*/
 *.parquet
+data/
+robocoin_analysis.json

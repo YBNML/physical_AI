@@ -152,6 +152,23 @@ def inspect(data_dir: str) -> None:
     print("   ⚠️ SDK(MCAP) 는 23차원이고 레이아웃이 다릅니다 — 섞으면 조용히 오염됩니다.")
 
 
+
+def circ_range(rad) -> float:
+    """
+    원형 범위 = 모든 각도를 포함하는 최소 호 [rad].
+
+    ⚠️ psi 는 (-pi, pi] 로 감기므로 선형 max-min 을 쓰면 안 된다.
+       실측에서 이 버그로 산포가 22.3° 대신 359.7° 로 나왔고,
+       판정이 "psi 생략 가능" 에서 "psi 필수" 로 뒤집혔다.
+       interface.py 가 Euler/quaternion 을 금지한 것과 같은 이유다.
+    """
+    a = np.sort(np.mod(np.asarray(rad, dtype=float), 2 * np.pi))
+    if len(a) < 2:
+        return 0.0
+    gaps = np.diff(np.concatenate([a, [a[0] + 2 * np.pi]]))
+    return float(2 * np.pi - np.max(gaps))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # A1 — 목 관절 운동 통계
 # ─────────────────────────────────────────────────────────────────────────────
@@ -306,7 +323,7 @@ def analyze_psi(eps: list[np.ndarray], side: str = "left",
         raise ValueError("psi 샘플 없음")
 
     A = np.degrees(np.asarray(psis))
-    spreads = [float(np.degrees(np.ptp(v))) for v in bins.values() if len(v) >= 5]
+    spreads = [math.degrees(circ_range(v)) for v in bins.values() if len(v) >= 5]
     if not spreads:
         spreads = [0.0]
 
@@ -328,7 +345,7 @@ def analyze_psi(eps: list[np.ndarray], side: str = "left",
         psi_p05_deg=float(np.percentile(A, 5)),
         psi_p50_deg=float(np.percentile(A, 50)),
         psi_p95_deg=float(np.percentile(A, 95)),
-        psi_range_deg=float(A.max() - A.min()),
+        psi_range_deg=math.degrees(circ_range(psis)),
         within_bin_spread_p50_deg=s50,
         within_bin_spread_p95_deg=s95,
         n_bins=len(spreads),
