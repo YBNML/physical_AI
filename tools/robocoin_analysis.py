@@ -3,7 +3,9 @@
 RoboCOIN 오프라인 분석 3종 — 로봇 없이 이 프로젝트의 핵심 쟁점 3개를 닫는다.
 
 RoboCOIN: BAAI 공개 실기체 Galbot G1 양팔 데이터셋
-          (~2,974 에피소드 / 2.02M 프레임 / ~18.7시간)
+          공개(non-gated) 5종 = 2,974 ep / 2,020,721 frames / 18.7h / ~30.8 GB
+          (2026-07-31 HF API 로 확인. robot_type='Galbot_G1')
+          gated 13종이 추가로 있음 — 전체 18종 164.4 GB, 대부분 비디오
 
 왜 이게 가치 있는가
 ──────────────────
@@ -26,8 +28,8 @@ RoboCOIN: BAAI 공개 실기체 Galbot G1 양팔 데이터셋
     python tools/robocoin_analysis.py --data <path> --all
     python tools/robocoin_analysis.py --data <path> --neck --psi
 
-⚠️ RoboCOIN 의 실제 컬럼명을 검증하지 못했다. `--inspect` 로 스키마를 먼저
-   확인하고, 다르면 COLUMNS 매핑만 고치면 된다.
+스키마는 tools/robocoin_schema.py 에 실측값으로 고정돼 있다.
+⚠️ RoboCOIN(21-D) 과 GalbotSDK(23-D) 는 레이아웃이 다르다. 섞으면 조용히 오염된다.
 """
 
 from __future__ import annotations
@@ -50,23 +52,27 @@ from g1_kinematics import G1Arm, G1Head, se3_inv  # noqa: E402
 # ─────────────────────────────────────────────────────────────────────────────
 # 데이터 스키마
 #
-# Galbot 공식 23차원 관절 벡터 (galbot-mcap2lerobot/joint_constants.py):
-#   [0:5]   leg_joint1..5        (다리 2 + 허리 3)
-#   [5:7]   head_joint1..2       (pan, tilt)
-#   [7:14]  left_arm_joint1..7
-#   [14]    left_gripper_joint1
-#   [15:22] right_arm_joint1..7
-#   [22]    right_gripper_joint1
+# RoboCOIN 스키마는 tools/robocoin_schema.py 가 단일 진실 원천이다.
+# (실제 meta/info.json 에서 확인, 2026-07-31)
 # ─────────────────────────────────────────────────────────────────────────────
 
-IDX = {
-    "leg": slice(0, 5),
-    "head": slice(5, 7),
-    "left_arm": slice(7, 14),
-    "left_gripper": 14,
-    "right_arm": slice(15, 22),
-    "right_gripper": 22,
-}
+# ⚠️ 2026-07-31 정정 — 실제 meta/info.json 확인 결과 RoboCOIN 은 SDK 와 다르다.
+#
+#     SDK (MCAP, 23-D)  : leg(5)   head(2) L팔(7) L그리퍼(1) R팔(7) R그리퍼(1)
+#     RoboCOIN (21-D)   : torso(3) head(2) L팔(7) L그리퍼(1) R팔(7) R그리퍼(1)
+#                         ^^^^^^^^ 다리 2개 없음
+#
+# 이전 코드는 SDK 레이아웃을 썼고, 그대로 돌렸으면 head 를 [5:7] 에서 읽어
+# **왼팔 j1,j2 를 목 관절로 착각**했을 것이다. 조용한 오염이고 결과가 전부 무의미해진다.
+# 단일 진실 원천은 tools/robocoin_schema.py.
+from robocoin_schema import (            # noqa: E402
+    STATE_IDX as IDX,
+    ACTION_IDX,
+    STATE_DIM,
+    ACTION_DIM,
+    FPS as SCHEMA_FPS,
+    PUBLIC_DATASETS,
+)
 
 # ⚠️ 확인 필요 — parquet 컬럼명. --inspect 로 확인 후 수정.
 COLUMNS = {
@@ -81,7 +87,7 @@ FPS_DEFAULT = 30.0
 
 
 def load_episodes(data_dir: str, limit: Optional[int] = None) -> list[np.ndarray]:
-    """parquet 들을 읽어 에피소드별 (T, 23) 상태 배열 리스트로."""
+    """parquet 들을 읽어 에피소드별 (T, 21) 상태 배열 리스트로 (RoboCOIN 스키마)."""
     try:
         import pyarrow.parquet as pq
     except ImportError:
@@ -101,7 +107,7 @@ def load_episodes(data_dir: str, limit: Optional[int] = None) -> list[np.ndarray
             if col not in tbl.column_names:
                 continue
             arr = np.array([np.asarray(x, dtype=float) for x in tbl[col].to_pylist()])
-            if arr.ndim == 2 and arr.shape[1] >= 23:
+            if arr.ndim == 2 and arr.shape[1] == STATE_DIM:
                 # 한 파일에 여러 에피소드가 있으면 분리
                 ecol = COLUMNS["episode"]
                 if ecol in tbl.column_names:
@@ -141,8 +147,9 @@ def inspect(data_dir: str) -> None:
         print(f"  {name:34s} {str(typ)[:24]:26s} {info}")
 
     print("\n⚠️ 위 컬럼명을 COLUMNS 딕셔너리와 대조하십시오.")
-    print("   23차원 상태 벡터의 레이아웃도 IDX 와 맞는지 확인하십시오:")
-    print("   [0:5] leg  [5:7] head  [7:14] L팔  [14] L그리퍼  [15:22] R팔  [22] R그리퍼")
+    print(f"   상태 벡터는 {STATE_DIM}차원이어야 합니다 (RoboCOIN 스키마):")
+    print("   [0:3] torso  [3:5] head  [5:12] L팔  [12] L그리퍼  [13:20] R팔  [20] R그리퍼")
+    print("   ⚠️ SDK(MCAP) 는 23차원이고 레이아웃이 다릅니다 — 섞으면 조용히 오염됩니다.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
