@@ -184,7 +184,8 @@ def verify(out_dir: str) -> int:
             bad += 1
 
         if "eef_sim_pose_state" in tbl.column_names:
-            print(f"  🎯 eef_sim_pose_state 있음 — FK 대조 검증 가능")
+            print(f"  ⚠️ eef_sim_pose_state 있음 — 단 cross-embodiment 정규화 좌표계이지")
+            print(f"     실제 FK 가 아님. 실제 EE 포즈는 관절값 + 우리 FK 로 계산할 것.")
 
     print("\n" + "=" * 72)
     if bad:

@@ -77,11 +77,29 @@ ACTION_IDX = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 EXTRA = {
-    # 🎯 EE 포즈가 이미 들어 있다. FK 를 돌리지 않아도 되고,
-    #    더 중요하게는 **우리 FK 와 대조해서 URDF 정합성을 검증**할 수 있다.
-    #    회전은 쿼터니언이 아니라 3-vector (아마 axis-angle 또는 euler — 확인 필요)
-    "eef_sim_pose_state": (12, ["left_pos_xyz(3)", "left_rot_xyz(3)",
-                                "right_pos_xyz(3)", "right_rot_xyz(3)"]),
+    # ⚠️⚠️ 2026-07-31 확인 — **이것은 우리 FK 와 다른 것이다. 대조 검증에 쓸 수 없다.**
+    #
+    #   이름의 "sim" 이 핵심이다. RoboCOIN 공식 문서:
+    #     "due to inconsistencies in coordinate system definitions across different
+    #      robotic SDKs, we employed a simulation-based approach to obtain the
+    #      end-effector poses of each robot expressed in a unified coordinate system"
+    #
+    #   즉 **15개 이종 로봇을 cross-embodiment 학습용으로 정규화한 좌표계**이지
+    #   Galbot G1 의 실제 FK 가 아니다.
+    #     - 프레임: x-forward / y-left / z-up, 원점은 base 또는 양발 중앙
+    #     - 회전: **Euler** (norm 이 3.33~4.38 로 pi 를 넘음 → axis-angle 이 아님)
+    #
+    #   우리 URDF FK 와 실측 비교 (에피소드 1개, 921 프레임):
+    #     거리 오차 median 588 mm
+    #     Δ방향 상관 cos = -0.24        (단순 프레임 오프셋이면 +1.0 이어야 함)
+    #     Kabsch 잔차 0.52              (순수 회전 관계도 아님)
+    #     양손 거리 비율 1.33 vs 경로 길이 비율 0.78  ← 서로 모순. 단일 스케일 아님
+    #     양손 거리 상관 0.89           (관련은 있으나 동일하지 않음 = retarget)
+    #
+    #   ⚠️ 이것을 실제 EE 포즈로 착각하고 학습하면 조용히 틀린다.
+    #      실제 EE 포즈가 필요하면 observation.state 의 관절값에 **우리 FK** 를 돌릴 것.
+    "eef_sim_pose_state": (12, ["left_pos_xyz(3)", "left_rot_euler(3)",
+                                "right_pos_xyz(3)", "right_rot_euler(3)"]),
     "eef_sim_pose_action": (12, ["동일, action 쪽"]),
 
     # 그리퍼가 두 표현으로 들어 있다:
@@ -145,8 +163,11 @@ CAVEATS = """
    불확실하므로, "환경 고정 목표에서 미관측 10 DoF" 문제를 이 데이터로는
    완전히 재현할 수 없다.
 
-4. eef 회전 표현이 3-vector 인데 axis-angle 인지 euler 인지 불명.
-   → 우리 FK 와 대조해서 역산할 것 (analyze_fk_consistency).
+4. ⚠️ eef_sim_pose_* 는 **cross-embodiment 정규화 좌표계**이지 G1 의 실제 FK 가
+   아니다 (공식 문서 확인). Euler 회전, x-forward/y-left/z-up, 원점은 base.
+   우리 FK 와 588mm 차이나고 Δ방향 상관이 -0.24 다. **FK 검증에 쓸 수 없고,
+   이것을 실제 EE 포즈로 알고 학습하면 조용히 틀린다.**
+   → 실제 EE 포즈는 observation.state 관절값 + 우리 FK 로 계산할 것.
 
 5. `*_gripper_open` 과 `*_gripper_open_scale` 의 단위 관계 불명.
 """
@@ -163,7 +184,7 @@ def summary() -> str:
         f"  gated 13종: 추가 (HF 로그인 + 동의 필요)\n"
         f"  state {STATE_DIM}-D (SDK 23-D 와 다름), action {ACTION_DIM}-D\n"
         f"  카메라 3대, {FPS} fps\n"
-        f"  🎯 eef_sim_pose_state 12-D 동봉 — FK 대조 검증에 쓸 것"
+        f"  ⚠️ eef_sim_pose_state 는 cross-embodiment 정규화 좌표계 — 실제 FK 아님"
     )
 
 
