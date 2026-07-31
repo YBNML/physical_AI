@@ -16,6 +16,11 @@
 # GNU make 3.81(macOS 기본) 에서도 돌아가야 하므로 .ONESHELL 등 4.x 문법은 안 쓴다.
 # =============================================================================
 
+# GalbotSDK 의 setup.sh 는 bash 문법을 쓴다. make 기본 셸(/bin/sh = dash on Ubuntu)로
+# source 하면 "Bad substitution" 이 나고 환경이 안 잡힌다 (2026-07-31 3090 에서 실제 발생).
+# 그때는 앞선 셸에서 이미 source 해둔 덕에 우연히 동작했을 뿐이라, 새 셸에서는 실패한다.
+SHELL      := /bin/bash
+
 ENV_NAME   ?= physical_ai
 
 # CONDA_EXE 는 conda init 이 export 해 주므로 subprocess 없이 base 를 알아낼 수 있다.
@@ -39,7 +44,7 @@ OUT        ?= gate1_results_$(HOST)_$(MACHINE).json
 SDK_SETUP  ?= /opt/galbot/galbot_sdk/linux-x86_64-gcc940/setup.sh
 
 .DEFAULT_GOAL := help
-.PHONY: help setup check test gate1 gate1-real probe probe-check probe-live analysis inspect e0-check e0-smoke bench lock clean
+.PHONY: help setup check test gate1 gate1-real probe probe-check probe-live fk-check analysis inspect e0-check e0-smoke bench lock clean
 
 # ─────────────────────────────────────────────────────────────────────────────
 help:  ## [모든 기계]
@@ -53,7 +58,7 @@ help:  ## [모든 기계]
 	@echo "    make lock         [모든 기계]  현재 환경을 기계별 lock 파일로 고정"
 	@echo ""
 	@echo "  검증 — 로봇 없이 되는 것"
-	@echo "    make test         [모든 기계]  기구학 T1~T6, 약 8초"
+	@echo "    make test         [모든 기계]  기구학 T1~T7, 약 8초"
 	@echo "    make gate1        [모든 기계]  GATE-1 dry-run (SDK 없이 스크립트만 검증)"
 	@echo "    make e0-check     [1660/3090]  E0 를 이 기계에서 돌릴 수 있는지 점검"
 	@echo "    make e0-smoke     [모든 기계]  E0 배선 검증 (합성 데이터, GPU 불필요)"
@@ -63,6 +68,7 @@ help:  ## [모든 기계]
 	@echo "  SDK"
 	@echo "    make probe        [회사 Linux]  GalbotSDK 시그니처 추출 (로봇 불필요)"
 	@echo "    make probe-live   [회사 Linux + 로봇]  읽기 전용 실물 조회 (안 움직임)"
+	@echo "    make fk-check     [회사 Linux + 로봇]  SDK FK 와 우리 FK 대조 (안 움직임)"
 	@echo ""
 	@echo "  실측"
 	@echo "    make gate1-real   [회사 Linux + 로봇]  ⚠️ 실기체가 움직인다"
@@ -87,7 +93,7 @@ lock:  ## [모든 기계]
 	@echo "→ environment.$(shell uname -s).$(shell uname -m).lock.yml"
 
 # ── 검증 ─────────────────────────────────────────────────────────────────────
-# T1 S–R–S 구조 / T2 IK 왕복 / T3 psi 스윕 / T4 L2 평균 붕괴 / T5 head 변환 / T6 속도.
+# T1 S–R–S / T2 IK 왕복 / T3 psi 스윕 / T4 L2 붕괴 / T5 head 변환 / T6 속도 / T7 tip 프레임.
 # 문서에 인용된 수치(warm 2.83ms, psi 스윕 팔꿈치 263mm, 목 1도당 10.5mm)를 직접 재현한다.
 test:  ## [모든 기계]
 	$(PY) robot/test_kinematics.py
@@ -106,6 +112,14 @@ gate1:  ## [모든 기계]
 #              손목 F/T 실값, 관절 이름 순서, 카메라 extrinsic 을 여기서 한 번에 얻는다.
 probe-check:  ## [모든 기계] SDK 없이 파서/안전차단 검증
 	$(PY) tools/probe_sdk.py --self-test
+	$(PY) tools/fk_crosscheck.py --self-test
+
+# SDK FK 와 우리 FK 대조 — URDF 자기일관성을 벗어나는 첫 외부 검증.
+# forward_kinematics 는 joint_state 를 인자로 받으므로 로봇을 움직이지 않는다.
+# 이 결과가 통과해야 psi/T_rel 을 데이터셋에 굽는 게 안전하다 (소급 수정 불가).
+fk-check:  ## [회사 Linux + 로봇] 로봇은 움직이지 않는다
+	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; exit 1; }
+	. $(SDK_SETUP) && $(PY) tools/fk_crosscheck.py --n 200
 
 probe:  ## [회사 Linux] 로봇 불필요
 	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; \

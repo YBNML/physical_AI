@@ -65,24 +65,50 @@ python -c "import galbot_sdk; print(galbot_sdk.__file__)"
 
 ---
 
-### 2-1. 🔴 SDK 시그니처 확정 — **GATE-1 보다 먼저**
+### 2-1. ✅ SDK 시그니처 — **2026-07-31 확정 완료**
 
-`galbot_sdk` 는 **pybind11 확장 모듈**입니다. 그래서 `inspect.signature()` 가
-전부 `(?)` 로 나옵니다. **메서드 이름은 확정됐지만 인자는 아직 모릅니다.**
-실제 인자는 docstring 안에 문자열로 들어 있고, 그걸 긁는 도구가 있습니다.
+`galbot_sdk` 는 **pybind11 확장 모듈**이라 `inspect.signature()` 가 전부 `(?)` 로
+나옵니다. 실제 인자는 docstring 안에 있고, `make probe` 가 그걸 긁습니다.
+**3090 에서 246/296 메서드의 시그니처를 복원했고, 어댑터는 그 기준으로 확정됐습니다.**
 
 ```bash
-# 0) 맥에서도 되는 자체 검증 (파서와 안전차단이 정상인지)
+# 0) 맥에서도 되는 자체 검증 (파서·안전차단·FK 비교 로직)
 make probe-check
 
-# 1) 정적 조사 — 로봇 불필요, 아무것도 안 움직임
+# 1) 정적 조사 — 로봇 불필요. SDK 가 갱신되면 다시 돌릴 것
 make probe
 #    → sdk_surface_<hostname>.json / .md
 
 # 2) 읽기 전용 실물 조회 — 로봇 전원 필요, 여전히 안 움직임
 make probe-live
 #    → sdk_live_<hostname>.json / .md
+
+# 3) SDK FK 와 우리 FK 대조 — 로봇 전원 필요, 안 움직임
+make fk-check
+#    → robot/assets/fk_crosscheck_<hostname>.json
 ```
+
+**확정된 시그니처가 뒤집은 것 3가지** — 셋 다 측정을 무의미하게 만들 수 있었습니다.
+
+| | 실제 | 그대로 뒀다면 |
+|---|---|---|
+| `set_joint_positions` | `is_blocking=True` **기본값** | rate 램프가 명령 전송률이 아니라 **모션 완료 시간**을 쟀을 것 |
+| `get_joint_positions` | `joint_groups` **필수 인자** | 무인자 호출 → `TypeError` |
+| `set_joint_commands` | `time_from_start_s=10.0` **기본값** | 매 명령이 "10초에 걸쳐 도달" → 사실상 안 움직임 |
+
+**관측 채널이 바뀌었습니다.** `JointState` 에는 **timestamp 필드가 없습니다**
+(`acceleration/current/effort/position/velocity` 뿐). "로봇 타임스탬프로 상태
+갱신률을 본다"는 원래 계획은 이 SDK 에서 불가능합니다. 대신 **모든 `set_*` 가
+`ControlStatus` 를 반환**하므로 그게 대체 증거입니다 — SUCCESS 비율이 무너지는
+지점이 실제 수락 천장입니다. `ForceData` 와 `GripperState` 에는 `timestamp_ns` 가
+있으므로, F/T 쪽에서는 로봇 시계를 쓸 수 있습니다.
+
+**`TARGET_TYPE_OVERRIDE` 는 `execute_joint_trajectory` 의 인자가 아니었습니다.**
+실제 시그니처는 `(trajectory: Trajectory, is_blocking=True)` 뿐이고, `TARGET_TYPE_*` 는
+`TargetConfig` → `TargetGroupTrajectory` → `SingoriXTarget` → `publish_target` 경로
+소속입니다. 값이 **비트 플래그**입니다 — `OVERRIDE(10) = CLEAR(2)|APPEND(8)`,
+`PROVERRIDE(14) = CLEAR|PREPENDNOW(4)|APPEND`. `SingoriXTarget` 필드 구성이
+미확인이라 이 경로는 아직 못 탑니다.
 
 > **안전:** `probe_sdk.py` 는 `set_` / `move_` / `execute_` 로 시작하는 메서드를
 > **코드 레벨에서 하드 차단**합니다 (`_assert_readonly`). `make probe-check` 가
@@ -95,10 +121,26 @@ make probe-live
 | `get_joint_names()` 실제 순서 | RoboCOIN(21-D) vs SDK 레이아웃 불일치로 이미 한 번 데였습니다. 이름으로 인덱싱하면 그 오염이 사라집니다 |
 | `get_force_sensor_data(LEFT_WRIST_FORCE)` 실값 | **손목 F/T 가 실제로 붙어 있고 값을 주는지** — §6 항목 3 |
 | `get_gripper_state()` / `get_suction_cup_state()` | **엔드이펙터 좌우 구성** 단서 — §6 항목 1 |
-| `get_sensor_extrinsic(...)` | **헤드 카메라 extrinsic** — §7 항목 4가 벤더 문의에서 자체 확인으로 |
-| `GalbotMotion.forward_kinematics_by_state` | **SDK FK 와 우리 FK 대조** — URDF만으로 유도한 우리 FK가 어긋나면 조용히 깨집니다 |
+| `get_sensor_extrinsic(sensor_id, reference_frame)` | **헤드 카메라 extrinsic** — §7 항목 4가 벤더 문의에서 자체 확인으로. `SensorType` 에 `HEAD_CAMERA / HEAD_DEPTH_CAMERA / HEAD_LEFT_CAMERA / HEAD_RIGHT_CAMERA` 가 모두 있어 **스테레오 + depth** 가 API 레벨에서 확인됩니다 |
+| `GalbotMotion.forward_kinematics` | **SDK FK 와 우리 FK 대조** (`make fk-check`) |
 
-**📩 알려주실 것**: `sdk_surface_*.md` 와 `sdk_live_*.md` 파일 그대로.
+**📩 알려주실 것**: `sdk_live_*.md` 와 `fk_crosscheck_*.json`.
+
+> **`make fk-check` 가 중요한 이유:** `test_kinematics.py` 의 T1~T7 은 전부 URDF
+> **자기일관성** 검정입니다. URDF 가 실기체와 다르면 7/7 통과해도 아무것도 보증하지
+> 않습니다. 그런데 그 FK 로 계산한 ψ 와 `T_rel` 이 데이터셋에 **영구히 구워지고**,
+> F/T 와 똑같이 소급 수정이 불가능합니다.
+>
+> `forward_kinematics(target_frame, reference_frame, joint_state=...)` 가 `joint_state` 를
+> **인자로** 받는 덕분에, 로봇을 그 자세로 움직이지 않고 임의 관절값으로 대조할 수 있습니다.
+> 진단은 **두 종류의 상대변환**으로 tip / root / 실제 URDF 오류를 분리합니다:
+>
+> | body-rel | spat-rel | 뜻 |
+> |---|---|---|
+> | ✅ | ✅ | 프레임까지 동일 |
+> | ✅ | ❌ | root(기준) 프레임만 다름 — 치명적 아님 |
+> | ❌ | ✅ | **tip 프레임만 다름** — 상수 오차라 학습이 흡수해 조용히 틀림 |
+> | ❌ | ❌ | 🔴 **URDF 자체가 실기체와 다름** — 변환 중단 |
 
 ---
 
@@ -357,8 +399,8 @@ free -h
 
 | 순위 | 작업 | 기계 | 로봇 | 이유 |
 |---|---|---|---|---|
-| **0** | `make probe` SDK 시그니처 | 3090 | ❌ 불필요 | **몇 분이면 끝나고 1·2를 동시에 풉니다.** 이게 먼저 |
-| **1** | `make probe-live` | 3090 + 로봇 | 전원만 | 손목 F/T·관절 순서·카메라 extrinsic·엔드이펙터를 **안 움직이고** 한 번에 |
+| ~~0~~ | ~~`make probe`~~ | 3090 | ❌ | ✅ **2026-07-31 완료.** 246/296 시그니처 확정 |
+| **1** | `make probe-live` + `make fk-check` | 3090 + 로봇 | 전원만 | 손목 F/T·관절 순서·카메라 extrinsic·엔드이펙터 + **FK 외부 검증**을 **안 움직이고** 한 번에 |
 | **2** | GATE-1 (PART A/B/C) | 3090 + 로봇 | ⚠️ 움직임 | 아키텍처 전제를 죽일 수 있음 |
 | **3** | 컨버터 포크 검증 | 3090 + 로봇 | 수집 | **수집 시작하면 소급 불가** |
 | **4** | 텔레옵 리그 bilateral 확인 | 실기체 | 육안 | API로 알 수 없는 유일한 항목 |

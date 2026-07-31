@@ -44,107 +44,109 @@ from typing import Callable, Optional
 # ─────────────────────────────────────────────────────────────────────────────
 # SDK 어댑터
 #
-# 2026-07-31 갱신 — 실물 SDK 표면을 3090에서 확인했다. **클래스/메서드 이름은 확정.**
+# 2026-07-31 — **실물 시그니처 확정.** `make probe` 로 3090 에서 pybind11 docstring
+# 246/296 을 복원했다. 더 이상 추측하지 않는다.
 #
-#   설치: /opt/galbot/galbot_sdk/linux-x86_64-gcc940/lib/python/galbot_sdk/
-#   ⚠️ import 전에 반드시 (안 하면 ImportError):
-#       source /opt/galbot/galbot_sdk/linux-x86_64-gcc940/setup.sh
+#   설치: /opt/galbot/galbot_sdk/linux-x86_64-gcc940/
+#   ⚠️ import 전 반드시:  source .../setup.sh   (bash 문법이므로 sh 로는 안 된다)
 #
-#   GalbotRobot — 하드웨어 저수준. 확인된 메서드:
-#       get_joint_names / get_joint_group_names / get_joint_positions / get_joint_states
-#       set_joint_commands / set_joint_commands_batch / set_joint_positions
-#       execute_joint_trajectory
-#       get_force_sensor_data          ← 손목 F/T
-#       get_gripper_state / set_gripper_command / get_sensor_extrinsic
+# 확정된 시그니처 중 측정에 직결되는 것들
+# ────────────────────────────────────────
+#   set_joint_commands(joint_commands: [JointCommand], joint_groups=[],
+#                      joint_names=[], time_from_start_s=10.0) -> ControlStatus
+#   set_joint_positions(joint_positions, joint_groups=[], joint_names=[],
+#                       is_blocking=True, speed_rad_s=0.2, timeout_s=15.0)
+#                      -> ControlStatus
+#   execute_joint_trajectory(trajectory: Trajectory, is_blocking=True)
+#                      -> ControlStatus
+#   set_joint_commands_batch(trajectory: Trajectory) -> ControlStatus
+#   get_joint_positions(joint_groups, joint_names=[]) -> [float]
+#   get_joint_states(joint_group_vec, joint_names_vec=[]) -> [JointState]
+#   get_joint_names(only_active_joint=True, joint_groups=[]) -> [str]
+#   get_joint_group_names() -> [str]
+#   check_trajectory_execution_status(joint_groups=[]) -> [TrajectoryControlStatus]
+#   stop_trajectory_execution() -> ControlStatus
+#   get_force_sensor_data(sensor_type: GalbotOneFoxtrotSensor) -> dict
+#   init(enable_sensor_set: {SensorType} = set()) -> bool
 #
-#   손목 F/T 센서 id: GalbotOneFoxtrotSensor.LEFT_WRIST_FORCE / RIGHT_WRIST_FORCE
+# 이 시그니처들이 뒤집은 것 — 셋 다 측정을 무의미하게 만들 수 있었다
+# ───────────────────────────────────────────────────────────────────
+#  1. `is_blocking` 기본값이 **True** 다. 그냥 부르면 rate 램프가 명령 전송률이
+#     아니라 **모션 완료 시간**을 잰다. 측정 경로에서는 전부 False 로 넘긴다.
+#  2. `get_joint_positions` 의 `joint_groups` 는 **필수 인자**다 (기본값 없음).
+#     무인자 호출은 TypeError 다.
+#  3. `set_joint_commands` 의 `time_from_start_s` 기본값이 **10.0 초**다.
+#     고속 스트리밍에서 그대로 두면 매 명령이 "10초에 걸쳐 도달" 을 뜻해
+#     사실상 움직이지 않는다. 짧은 지평을 명시한다.
 #
-#   명령 경로가 **두 개**다 (이 스크립트가 둘 다 잰다):
-#       direct     — set_joint_commands 를 고속 반복        → PART A/B
-#       trajectory — execute_joint_trajectory + TARGET_TYPE_OVERRIDE → PART C
+# 관측 가능성 — 여기서 방향이 바뀌었다
+# ────────────────────────────────────
+#   `JointState` 에는 **timestamp 가 없다** (acceleration/current/effort/
+#   position/velocity 뿐). 즉 "로봇 타임스탬프로 상태 갱신률을 본다" 는 원래
+#   계획은 이 SDK 에서 **불가능**하다.
+#   대신 모든 `set_*` 가 **ControlStatus 를 반환**한다. 이게 대체 증거 채널이다:
+#   명령이 SUCCESS 로 수락됐는지 호출별로 알 수 있다. 완전한 "실행됨" 증거는
+#   아니지만 (fire-and-forget 이면 SUCCESS 도 즉시 돌아올 수 있다),
+#   PUBLISH_FAIL / COMM_DISCONNECTED / TIMEOUT 은 확실히 잡아낸다.
+#   궤적 경로에는 `check_trajectory_execution_status` 라는 더 강한 채널이 있다
+#   (RUNNING / COMPLETED / STOPPED_UNREACHED / ERROR).
 #
-# ⚠️ 아직 모르는 것: **인자 시그니처.** galbot_sdk 는 pybind11 확장이라
-#    inspect.signature() 가 전부 실패한다 (`(?)` 만 나옴). 실제 인자는 docstring 에
-#    들어 있으므로 먼저 이걸 돌려 확정하십시오:
-#
-#        python tools/probe_sdk.py --focus
-#
-#    확정 전까지 아래 코드는 **호출 패턴 사다리**를 순서대로 시도하고, 전부 실패하면
-#    해당 메서드의 docstring 을 그대로 출력한다. 추측으로 한 패턴만 박아두면
-#    틀렸을 때 원인을 알 수 없기 때문이다.
+# ⚠️ TARGET_TYPE_* 는 `execute_joint_trajectory` 인자가 아니다.
+#    실제로는 TargetConfig(target_type/target_data/target_sampling/...) →
+#    TargetGroupTrajectory → SingoriXTarget → publish_target 경로 소속이다.
+#    값이 **비트 플래그**다: OVERRIDE(10) = CLEAR(2)|APPEND(8),
+#    PROVERRIDE(14) = CLEAR(2)|PREPENDNOW(4)|APPEND(8).
+#    SingoriXTarget 의 필드 구성이 미확인이라 이 경로는 아직 못 탄다.
+#    그래서 PART C 는 `execute_joint_trajectory` 재발행으로 대체 측정한다.
 # ─────────────────────────────────────────────────────────────────────────────
 
 SDK_SETUP = "/opt/galbot/galbot_sdk/linux-x86_64-gcc940/setup.sh"
 
-# 드라이런 전용 — 궤적 덮어쓰기의 가짜 전송 지연. PART C 가 이 값을 되찾아내면
+# 드라이런 전용 — 궤적 재발행의 가짜 전송 지연. PART C 가 이 값을 되찾아내면
 # 측정 코드가 옳다는 뜻이다 (로봇 없이 검증하는 방법).
 SIM_TRANSPORT_S = 0.035
+
+# 팔 관절이 속한 그룹 이름 후보. 실물은 get_joint_group_names() 로 확인한다.
+_ARM_GROUP_HINTS = ("left_arm", "right_arm", "arm")
 
 
 def _doc(obj: object) -> str:
     return (getattr(obj, "__doc__", None) or "(docstring 없음)").strip()[:900]
 
 
-class SDKCallFailed(RuntimeError):
-    """호출 패턴을 전부 실패. docstring 을 담아 다음 수정을 안내한다."""
-
-    def __init__(self, name: str, fn: object, tried: list[tuple[str, str]]):
-        lines = [
-            f"[adapter] `{name}` 호출 패턴을 전부 실패했습니다.",
-            "",
-            "시도한 것:",
-        ]
-        lines += [f"  - {pat}\n      → {err}" for pat, err in tried]
-        lines += [
-            "",
-            f"`{name}` 의 실제 시그니처 (pybind11 docstring):",
-            "─" * 70,
-            _doc(fn),
-            "─" * 70,
-            "",
-            "이 출력을 그대로 공유해주시면 어댑터를 확정합니다.",
-            "전체 표면을 한 번에 뜨려면:  python tools/probe_sdk.py --focus",
-        ]
-        super().__init__("\n".join(lines))
-
-
-def _try_patterns(name: str, fn, patterns: list[tuple[str, tuple, dict]]):
-    """(라벨, args, kwargs) 사다리를 순서대로 시도. 첫 성공을 반환."""
-    tried: list[tuple[str, str]] = []
-    for label, a, kw in patterns:
-        try:
-            return fn(*a, **kw), label
-        except Exception as e:
-            tried.append((label, f"{type(e).__name__}: {e}"[:200]))
-    raise SDKCallFailed(name, fn, tried)
-
-
 class G1Adapter:
-    """GalbotSDK 래퍼.
+    """GalbotSDK 래퍼 — 실물 시그니처 기준.
 
-    실물 시그니처가 확정되면 `_resolve_*` 메서드의 패턴 사다리를 확정된 하나로
-    줄이면 된다. 나머지 측정 코드는 손댈 필요 없다.
+    측정 경로에서는 **절대 blocking 호출을 쓰지 않는다.** is_blocking=True 로
+    부르면 명령 전송률이 아니라 모션 완료 시간을 재게 된다.
     """
 
     def __init__(self, dry_run: bool = False, joint_name: str = "left_arm_joint4",
-                 tau_s: float = 0.015):
+                 tau_s: float = 0.015, horizon_s: float = 0.1,
+                 send_api: str = "commands"):
         self.dry_run = dry_run
         self.joint_name = joint_name
+        self.horizon_s = horizon_s          # time_from_start_s
+        self.send_api = send_api            # "commands" | "positions"
         self._robot = None
+        self._motion = None
         self._sdk = None
         self._joint_names: list[str] = []
+        self._groups: list[str] = []
+        self._arm_group: Optional[str] = None
         self._joint_idx: Optional[int] = None
         self._sim_pos = 0.0
         self._sim_tau = tau_s
         self._sim_t0 = time.perf_counter()
 
-        # 어떤 호출 패턴이 실제로 통했는지 — 결과 JSON 에 기록해 재현 가능하게
         self.resolved: dict[str, str] = {}
-        # 상태 타임스탬프가 로봇 것인지 호스트 것인지. 이게 결과 해석을 바꾼다.
-        self.ts_source = "sim" if dry_run else "unknown"
-        self._ts_attr: Optional[str] = None
-        self._read_via = "positions"        # "positions" | "states"
+        # JointState 에 timestamp 가 없음이 확인됐으므로 실물은 항상 host 다.
+        self.ts_source = "sim" if dry_run else "host_monotonic"
         self.traj_supported: Optional[bool] = None
+        # ControlStatus ack 집계 — 타임스탬프 대신 쓰는 관측 채널
+        self.ack_ok = 0
+        self.ack_total = 0
+        self.ack_bad: dict[str, int] = {}
 
         if dry_run:
             print(f"[adapter] DRY-RUN — 1차 지연 플랜트 시뮬레이션 (tau={tau_s*1e3:.0f}ms)")
@@ -159,136 +161,126 @@ class G1Adapter:
         except ImportError as e:
             sys.exit(
                 f"[adapter] GalbotSDK import 실패: {e}\n\n"
-                f"  SDK 환경을 먼저 로드해야 합니다:\n"
+                f"  SDK 환경을 먼저 로드해야 합니다 (bash 필요):\n"
                 f"      source {SDK_SETUP}\n\n"
-                "  - SDK 는 Linux 전용입니다 (linux-x86_64 / linux-aarch64).\n"
-                "    Mac 에서는 --dry-run 으로 스크립트만 검증하십시오.\n"
+                "  - SDK 는 Linux 전용입니다. Mac 에서는 --dry-run 만 됩니다.\n"
                 "  - 경로가 다르면:  find /opt -maxdepth 6 -type d -name galbot_sdk\n"
             )
         self._sdk = sdk
         print(f"[adapter] galbot_sdk {getattr(sdk, '__file__', '?')}")
 
-        robot, pat = _try_patterns(
-            "GalbotRobot()", sdk.GalbotRobot,
-            [("GalbotRobot()", (), {})]
-            + [(f"GalbotRobot(MachineType.{m})", (getattr(sdk.MachineType, m),), {})
-               for m in getattr(getattr(sdk, "MachineType", None), "__members__", {})],
-        )
-        self._robot = robot
-        self.resolved["ctor"] = pat
-        print(f"[adapter] 생성 OK — {pat}")
+        self._robot = sdk.GalbotRobot()
+        # init(enable_sensor_set) — 센서를 안 켜면 카메라 스트림 비용이 안 든다.
+        # F/T 는 SensorType 이 아니라 GalbotOneFoxtrotSensor 라 여기 포함되지 않는다.
+        if not self._robot.init(set()):
+            sys.exit("[adapter] GalbotRobot.init() 이 False 를 반환했습니다. "
+                     "로봇 전원/네트워크를 확인하십시오.")
+        self.resolved["ctor"] = "GalbotRobot(); init(set())"
+        print(f"[adapter] init OK · is_running={self._robot.is_running()}")
+
+        self._groups = list(self._robot.get_joint_group_names())
+        print(f"[adapter] joint group {len(self._groups)}개: {self._groups}")
+
+        self._joint_names = list(self._robot.get_joint_names(only_active_joint=True))
+        print(f"[adapter] active joint {len(self._joint_names)}개")
 
         self._resolve_joint_index()
-        self._probe_state_timestamp()
+        self._resolve_arm_group()
+        self._acquire()
 
     def _resolve_joint_index(self) -> None:
-        """관절 이름 목록을 받아 우리가 흔들 관절의 인덱스를 찾는다.
-
-        이걸 먼저 하는 이유: RoboCOIN(21-D)과 SDK 관절 벡터의 레이아웃이 다르다는
-        걸 이미 한 번 데였다. 이름으로 인덱스를 잡으면 그 종류의 조용한 오염이 없다.
-        """
-        names, pat = _try_patterns(
-            "get_joint_names", self._robot.get_joint_names,
-            [("get_joint_names()", (), {})]
-            + [(f"get_joint_names(G1JointGroup.{m})",
-                (getattr(self._sdk.G1JointGroup, m),), {})
-               for m in getattr(getattr(self._sdk, "G1JointGroup", None),
-                                "__members__", {})],
-        )
-        self.resolved["get_joint_names"] = pat
-        self._joint_names = [str(n) for n in names]
-        print(f"[adapter] 관절 {len(self._joint_names)}개 — {pat}")
-
-        if self.joint_name in self._joint_names:
-            self._joint_idx = self._joint_names.index(self.joint_name)
+        """관절을 **이름으로** 잡는다. 인덱스 가정은 조용한 오염의 원천이다."""
+        names = self._joint_names
+        if self.joint_name in names:
+            self._joint_idx = names.index(self.joint_name)
         else:
-            # 이름 규칙이 다를 수 있다 (left_arm_joint4 vs left_arm_joint_4 등)
             key = self.joint_name.replace("_", "").lower()
-            hits = [i for i, n in enumerate(self._joint_names)
+            hits = [i for i, n in enumerate(names)
                     if n.replace("_", "").lower() == key]
             if not hits:
                 sys.exit(
                     f"[adapter] 관절 '{self.joint_name}' 을 찾을 수 없습니다.\n"
-                    f"  SDK 가 보고한 관절 이름 {len(self._joint_names)}개:\n"
-                    + "\n".join(f"    [{i:2d}] {n}"
-                                for i, n in enumerate(self._joint_names))
-                    + f"\n\n  --joint <이름> 으로 정확한 이름을 지정하십시오."
+                    f"  SDK 가 보고한 관절 {len(names)}개:\n"
+                    + "\n".join(f"    [{i:2d}] {n}" for i, n in enumerate(names))
+                    + "\n\n  --joint <이름> 으로 지정하십시오."
                 )
             self._joint_idx = hits[0]
-            self.joint_name = self._joint_names[hits[0]]
+            self.joint_name = names[hits[0]]
             print(f"[adapter] 이름 정규화 → '{self.joint_name}'")
-        print(f"[adapter] 대상 관절 index {self._joint_idx}")
+        print(f"[adapter] 대상 관절 '{self.joint_name}' index {self._joint_idx}")
 
-    def _probe_state_timestamp(self) -> None:
-        """로봇이 자체 타임스탬프를 주는지 확인.
+    def _resolve_arm_group(self) -> None:
+        """대상 관절이 속한 joint group. get_joint_positions 의 필수 인자다."""
+        for g in self._groups:
+            try:
+                if self.joint_name in self._robot.get_joint_names(
+                        only_active_joint=True, joint_groups=[g]):
+                    self._arm_group = g
+                    break
+            except Exception:
+                continue
+        if self._arm_group is None:
+            side = self.joint_name.split("_")[0]
+            for g in self._groups:
+                if g.startswith(side) and "arm" in g:
+                    self._arm_group = g
+                    break
+        if self._arm_group is None:
+            sys.exit(f"[adapter] '{self.joint_name}' 이 속한 joint group 을 못 찾음. "
+                     f"그룹 목록: {self._groups}")
+        # 그룹 내 인덱스 — get_joint_positions(그룹) 결과에서 우리 관절 위치
+        gnames = list(self._robot.get_joint_names(
+            only_active_joint=True, joint_groups=[self._arm_group]))
+        self._group_names = gnames
+        self._group_idx = gnames.index(self.joint_name)
+        print(f"[adapter] joint group '{self._arm_group}' "
+              f"({len(gnames)}개) 내 index {self._group_idx}")
 
-        중요: 못 주면 호스트 시계로 대체하는데, 그러면 PART A 의 `unique_state_frac`
-        과 `state_dt_*` 는 **로봇이 아니라 우리 루프**를 재는 값이 된다. 그 차이를
-        모르고 보면 stale 상태를 건강한 것으로 오독한다. 그래서 결과에 명시한다.
-        """
+    def _acquire(self) -> None:
+        """컨트롤러 확보. 이게 없으면 명령이 조용히 무시될 수 있다."""
         try:
-            st, _ = _try_patterns(
-                "get_joint_states", self._robot.get_joint_states,
-                [("get_joint_states()", (), {})],
-            )
-            probe = st[0] if isinstance(st, (list, tuple)) and st else st
-            for attr in ("timestamp_ns", "timestamp", "stamp", "header"):
-                if hasattr(probe, attr) and self._to_ns(getattr(probe, attr)) is not None:
-                    self._ts_attr = attr
-                    self.ts_source = f"device.{attr}"
-                    # 타임스탬프를 실제로 쓰려면 read 경로도 get_joint_states 여야 한다.
-                    # get_joint_positions 는 float 만 주므로 타임스탬프가 없다.
-                    self._read_via = "states"
-                    print(f"[adapter] 상태 타임스탬프: 로봇 제공 ({attr}) — read 경로를 "
-                          f"get_joint_states 로 고정")
-                    return
+            st = self._robot.acquire_controller(self._arm_group)
+            print(f"[adapter] acquire_controller('{self._arm_group}') → "
+                  f"{self._name_of(st)}")
+            self.resolved["acquire"] = self._name_of(st)
         except Exception as e:
-            print(f"[adapter] get_joint_states 탐색 실패: {type(e).__name__}: {e}")
-        self.ts_source = "host_monotonic"
-        self._read_via = "positions"
-        print("[adapter] ⚠️ 로봇 타임스탬프 없음 → 호스트 시계 사용.")
-        print("          state_dt_* / unique_state_frac 은 '로봇 응답'이 아니라")
-        print("          '우리 루프'를 재는 값이 됩니다. 판정에서 천장은")
-        print("          '미확인(unconfirmed)'으로 강등됩니다.")
+            print(f"[adapter] ⚠️ acquire_controller 실패: {type(e).__name__}: {e}")
+            print("          명령이 무시될 수 있습니다. 활성 컨트롤러:")
+            try:
+                print(f"          {self._robot.get_active_controller(self._arm_group)}")
+            except Exception:
+                pass
 
-    @staticmethod
-    def _to_ns(v: object) -> Optional[int]:
-        """SDK 가 어떤 형태로 주든 ns 정수로. 못 바꾸면 None."""
-        # ROS 스타일 Header/stamp: sec + nanosec
-        for sec_a, nsec_a in (("sec", "nanosec"), ("secs", "nsecs"),
-                              ("sec", "nsec")):
-            if hasattr(v, sec_a) and hasattr(v, nsec_a):
-                try:
-                    return int(getattr(v, sec_a)) * 1_000_000_000 + int(getattr(v, nsec_a))
-                except Exception:
-                    return None
-        if hasattr(v, "stamp"):
-            return G1Adapter._to_ns(v.stamp)
-        if isinstance(v, (int, float)):
-            x = float(v)
-            if x <= 0:
-                return None
-            # 단위 추정: 1e18~ = ns, 1e15~ = us, 1e12~ = ms, 그 외 = s
-            if x > 1e17:
-                return int(x)
-            if x > 1e14:
-                return int(x * 1e3)
-            if x > 1e11:
-                return int(x * 1e6)
-            return int(x * 1e9)
-        return None
+    def _name_of(self, status: object) -> str:
+        return getattr(status, "name", str(status))
+
+    def _track(self, status: object) -> None:
+        """ControlStatus ack 집계. timestamp 가 없는 이 SDK 의 관측 채널."""
+        self.ack_total += 1
+        nm = self._name_of(status)
+        if nm == "SUCCESS":
+            self.ack_ok += 1
+        else:
+            self.ack_bad[nm] = self.ack_bad.get(nm, 0) + 1
+
+    def ack_frac(self) -> float:
+        return (self.ack_ok / self.ack_total) if self.ack_total else float("nan")
+
+    def reset_ack(self) -> None:
+        self.ack_ok = self.ack_total = 0
+        self.ack_bad = {}
 
     # ── 읽기 ────────────────────────────────────────────────────────────────
     def read_state(self) -> tuple[int, float, Optional[float]]:
         """(timestamp_ns, position_rad, effort_Nm|None).
 
-        타임스탬프는 로봇이 주면 로봇 것을, 아니면 호스트 시계를 쓴다.
-        어느 쪽인지는 `self.ts_source` 에 남고 결과 JSON 에 기록된다 — 이 구분이
-        `unique_state_frac` / `state_dt_*` 의 의미를 통째로 바꾸기 때문이다.
+        ⚠️ 타임스탬프는 **항상 호스트 시계**다. `JointState` 에 timestamp 필드가
+        없음이 실물 확인됐다 (acceleration/current/effort/position/velocity 뿐).
+        따라서 state_dt_* / unique_state_frac 은 로봇 응답이 아니라 우리 루프를
+        재는 값이고, 판정에서 천장은 절대 '확인됨'으로 승격되지 않는다.
+        관측 증거는 ControlStatus ack 쪽에서 얻는다.
         """
         if self.dry_run:
-            # 궤적 경로가 활성이면 여기서도 플랜트를 전진시킨다.
-            # (PART C 는 send 없이 read 만 반복하므로 이게 없으면 응답이 없다)
             if self._sim_traj_at is not None:
                 now = time.perf_counter()
                 if now >= self._sim_traj_at:
@@ -299,57 +291,41 @@ class G1Adapter:
                         self._sim_pos += alpha * (self._sim_target - self._sim_pos)
             return (time.monotonic_ns(), self._sim_pos, 0.0)
 
-        if self._read_via == "states":
-            st = self._robot.get_joint_states()
-            item = st[self._joint_idx] if isinstance(st, (list, tuple)) else st
-            p = float(getattr(item, "position", item))
-            ts = self._to_ns(getattr(item, self._ts_attr, None)) if self._ts_attr else None
-            return (ts if ts is not None else time.monotonic_ns(), p,
-                    getattr(item, "effort", None))
+        pos = self._robot.get_joint_positions([self._arm_group])
+        return (time.monotonic_ns(), float(pos[self._group_idx]), None)
 
+    def read_effort(self) -> Optional[float]:
+        """JointState.effort — 타임스탬프는 없지만 effort/current 는 있다."""
+        if self.dry_run or self._robot is None:
+            return None
         try:
-            pos, pat = _try_patterns(
-                "get_joint_positions", self._robot.get_joint_positions,
-                [("get_joint_positions()", (), {})],
-            )
-            self.resolved.setdefault("get_joint_positions", pat)
-            p = float(pos[self._joint_idx])
+            st = self._robot.get_joint_states([self._arm_group])
+            return float(getattr(st[self._group_idx], "effort", float("nan")))
         except Exception:
-            st, pat = _try_patterns(
-                "get_joint_states", self._robot.get_joint_states,
-                [("get_joint_states()", (), {})],
-            )
-            self.resolved.setdefault("read", pat)
-            item = st[self._joint_idx] if isinstance(st, (list, tuple)) else st
-            p = float(getattr(item, "position", item))
+            return None
 
-        return (time.monotonic_ns(), p, None)
+    def read_wrench(self) -> Optional[dict]:
+        """손목 F/T. get_force_sensor_data 는 dict 를 돌려준다 (ForceData 아님).
 
-    def read_wrench(self) -> Optional[list[float]]:
-        """손목 F/T. GATE-1 본체는 아니지만 여기서 한 번에 확인해둔다."""
+        ForceData 에는 timestamp_ns 가 있으므로, 반환 dict 에도 있을 가능성이 크다.
+        있으면 **F/T 쪽에서는 로봇 타임스탬프를 쓸 수 있다** — 관절 상태에는 없지만.
+        """
         if self.dry_run or self._robot is None:
             return None
         E = getattr(self._sdk, "GalbotOneFoxtrotSensor", None)
-        if E is None or not hasattr(self._robot, "get_force_sensor_data"):
+        if E is None:
             return None
         side = "LEFT" if self.joint_name.startswith("left") else "RIGHT"
         mem = f"{side}_WRIST_FORCE"
         if mem not in getattr(E, "__members__", {}):
             return None
         try:
-            d = self._robot.get_force_sensor_data(getattr(E, mem))
-        except Exception:
-            return None
-        f = getattr(d, "force", None)
-        if f is None:
-            return None
-        try:
-            return [float(x) for x in (list(f) if not hasattr(f, "x")
-                                       else [f.x, f.y, f.z])]
-        except Exception:
+            return self._robot.get_force_sensor_data(getattr(E, mem))
+        except Exception as e:
+            print(f"[adapter] get_force_sensor_data 실패: {type(e).__name__}: {e}")
             return None
 
-    # ── 쓰기: 경로 1 — 직접 명령 ────────────────────────────────────────────
+    # ── 쓰기: 경로 A — 직접 명령 ────────────────────────────────────────────
     def send_position(self, pos_rad: float) -> None:
         if self.dry_run:
             now = time.perf_counter()
@@ -359,110 +335,117 @@ class G1Adapter:
             self._sim_pos += alpha * (pos_rad - self._sim_pos)
             return
 
-        if "send" in self.resolved:
-            self._send_impl(pos_rad)
-            return
-
-        # 첫 호출에서만 패턴 사다리를 탄다. 이후엔 확정된 것만 쓴다.
-        full = list(self._read_all_positions())
-        full[self._joint_idx] = pos_rad
-        pats = [
-            ("set_joint_positions(names, positions)",
-             (self._joint_names, full), {}),
-            ("set_joint_positions([name], [pos])",
-             ([self.joint_name], [pos_rad]), {}),
-            ("set_joint_positions(positions)", (full,), {}),
-            ("set_joint_positions({name: pos})", ({self.joint_name: pos_rad},), {}),
-        ]
-        _, pat = _try_patterns("set_joint_positions",
-                               self._robot.set_joint_positions, pats)
-        self.resolved["send"] = pat
-        print(f"[adapter] 명령 경로 확정 — {pat}")
-
-    def _read_all_positions(self) -> list[float]:
-        try:
-            pos, _ = _try_patterns("get_joint_positions",
-                                   self._robot.get_joint_positions,
-                                   [("get_joint_positions()", (), {})])
-            return [float(x) for x in pos]
-        except Exception:
-            return [0.0] * len(self._joint_names)
-
-    def _send_impl(self, pos_rad: float) -> None:
-        """확정된 패턴으로만 보낸다 — 측정 루프에서 예외 처리 비용을 없애기 위해."""
-        pat = self.resolved["send"]
-        if pat.startswith("set_joint_positions(names, positions)"):
-            full = self._cached_full
-            full[self._joint_idx] = pos_rad
-            self._robot.set_joint_positions(self._joint_names, full)
-        elif pat.startswith("set_joint_positions([name]"):
-            self._robot.set_joint_positions([self.joint_name], [pos_rad])
-        elif pat.startswith("set_joint_positions(positions)"):
-            full = self._cached_full
-            full[self._joint_idx] = pos_rad
-            self._robot.set_joint_positions(full)
+        if self.send_api == "positions":
+            # ⚠️ is_blocking=False 필수. 기본값 True 로 부르면 모션 완료를 기다린다.
+            st = self._robot.set_joint_positions(
+                [pos_rad],
+                joint_names=[self.joint_name],
+                is_blocking=False,
+                timeout_s=self.horizon_s * 3,
+            )
         else:
-            self._robot.set_joint_positions({self.joint_name: pos_rad})
-
-    _cached_full: list[float] = []
+            cmd = self._sdk.JointCommand()
+            cmd.position = pos_rad
+            # ⚠️ time_from_start_s 기본값 10.0 초를 반드시 덮어쓴다.
+            st = self._robot.set_joint_commands(
+                [cmd],
+                joint_names=[self.joint_name],
+                time_from_start_s=self.horizon_s,
+            )
+        self._track(st)
 
     def prime(self) -> None:
-        """측정 시작 전 1회 — 패턴 확정과 캐시 워밍을 측정 밖에서 끝낸다."""
+        """측정 시작 전 1회 — 첫 호출 비용을 측정 밖으로 뺀다."""
         if self.dry_run:
             return
-        self._cached_full = self._read_all_positions()
-        self.send_position(self._cached_full[self._joint_idx])
+        _, p, _ = self.read_state()
+        self.send_position(p)
+        print(f"[adapter] prime OK — send_api={self.send_api}, "
+              f"time_from_start_s={self.horizon_s}, ack={self._fmt_ack()}")
+        self.reset_ack()
 
-    # ── 쓰기: 경로 2 — 궤적 덮어쓰기 ────────────────────────────────────────
+    def _fmt_ack(self) -> str:
+        if not self.ack_total:
+            return "n/a"
+        bad = ", ".join(f"{k}×{v}" for k, v in self.ack_bad.items())
+        return f"{self.ack_ok}/{self.ack_total}" + (f" ({bad})" if bad else "")
+
+    # ── 쓰기: 경로 B — 궤적 ─────────────────────────────────────────────────
+    def _build_trajectory(self, times_s: list[float],
+                          positions_rad: list[float]):
+        T = self._sdk.Trajectory()
+        T.joint_names = [self.joint_name]
+        T.joint_groups = []
+        pts = []
+        for t, p in zip(times_s, positions_rad):
+            jc = self._sdk.JointCommand()
+            jc.position = p
+            tp = self._sdk.TrajectoryPoint()
+            tp.joint_command_vec = [jc]
+            tp.time_from_start_second = float(t)
+            pts.append(tp)
+        T.points = pts
+        return T
+
     def send_trajectory(self, times_s: list[float], positions_rad: list[float],
-                        override: bool = True) -> bool:
-        """execute_joint_trajectory + TARGET_TYPE_OVERRIDE.
+                        stop_first: bool = False) -> bool:
+        """execute_joint_trajectory 로 궤적을 발행한다 (non-blocking).
 
-        chunk 스트리밍의 실제 경로 후보다. 성공 여부를 bool 로 돌려주며,
-        시그니처가 안 맞으면 False (측정을 중단시키지 않는다).
+        ⚠️ TARGET_TYPE_OVERRIDE 는 여기 인자가 아니다 (SingoriXTarget 경로 소속).
+        따라서 "덮어쓰기" 는 **재발행이 기존 궤적을 대체하는가**로 실측한다.
+        `stop_first=True` 면 stop_trajectory_execution() 을 먼저 호출한다 —
+        두 경우의 지연 차이가 곧 큐 의미론에 대한 증거다.
         """
         if self.dry_run:
-            # 시뮬: 전송 지연 SIM_TRANSPORT 후 마지막 목표로 재조준.
-            # PART C 가 이 지연을 되찾아내야 코드가 옳다는 뜻이 된다.
             self._sim_target = positions_rad[-1]
             self._sim_traj_at = time.perf_counter() + SIM_TRANSPORT_S
             return True
-        if self._robot is None or not hasattr(self._robot, "execute_joint_trajectory"):
+        if self._robot is None:
             return False
-
-        sdk = self._sdk
-        ttype = getattr(sdk, "TARGET_TYPE_OVERRIDE" if override
-                        else "TARGET_TYPE_APPEND", None)
-        pats: list[tuple[str, tuple, dict]] = [
-            ("execute_joint_trajectory(names, times, positions, TARGET_TYPE_OVERRIDE)",
-             ([self.joint_name], times_s, [[p] for p in positions_rad], ttype), {}),
-            ("execute_joint_trajectory(names, times, positions)",
-             ([self.joint_name], times_s, [[p] for p in positions_rad]), {}),
-        ]
         try:
-            _, pat = _try_patterns("execute_joint_trajectory",
-                                   self._robot.execute_joint_trajectory, pats)
-            self.resolved["trajectory"] = pat
+            if stop_first:
+                self._robot.stop_trajectory_execution()
+            traj = self._build_trajectory(times_s, positions_rad)
+            st = self._robot.execute_joint_trajectory(traj, is_blocking=False)
+            self._track(st)
             self.traj_supported = True
-            return True
-        except SDKCallFailed as e:
+            self.resolved["trajectory"] = (
+                "execute_joint_trajectory(Trajectory, is_blocking=False)"
+                + (" + stop_first" if stop_first else ""))
+            return self._name_of(st) in ("SUCCESS", "IN_PROGRESS", "RUNNING")
+        except Exception as e:
             if self.traj_supported is None:
                 self.traj_supported = False
-                print("\n[adapter] 궤적 경로(PART C)를 쓸 수 없습니다 — 시그니처 미확인.")
-                print(str(e))
+                print(f"\n[adapter] 궤적 경로(PART C) 실패: {type(e).__name__}: {e}")
+                print("  execute_joint_trajectory 실제 시그니처:")
+                print("  " + _doc(self._robot.execute_joint_trajectory).splitlines()[0])
             return False
+
+    def traj_status(self) -> list[str]:
+        """RUNNING / COMPLETED / STOPPED_UNREACHED / ERROR — 궤적 경로의 관측 채널."""
+        if self.dry_run or self._robot is None:
+            return []
+        try:
+            return [self._name_of(s) for s in
+                    self._robot.check_trajectory_execution_status([self._arm_group])]
+        except Exception:
+            return []
 
     _sim_target: float = 0.0
     _sim_traj_at: Optional[float] = None
+    _group_names: list[str] = []
+    _group_idx: int = 0
 
     def close(self) -> None:
         if self.dry_run or self._robot is None:
             return
-        for m in ("disconnect", "shutdown", "close", "stop"):
-            if hasattr(self._robot, m):
+        for fn, arg in (("stop_trajectory_execution", None),
+                        ("release_controller", self._arm_group),
+                        ("destroy", None)):
+            if hasattr(self._robot, fn):
                 try:
-                    getattr(self._robot, m)()
-                    return
+                    getattr(self._robot, fn)() if arg is None \
+                        else getattr(self._robot, fn)(arg)
                 except Exception:
                     pass
 
@@ -489,6 +472,10 @@ class RateResult:
     # 관측 가능한 상태 갱신률 = unique_state_frac × achieved_hz.
     # 로봇 타임스탬프가 있을 때만 의미가 있다.
     state_hz: float
+    # ControlStatus ack — JointState 에 timestamp 가 없는 이 SDK 의 관측 채널.
+    # SUCCESS 비율이 떨어지기 시작하는 지점이 실제 수락 천장이다.
+    ack_frac: float
+    ack_bad: str
     # 명령 송신 주기 (우리가 얼마나 규칙적으로 보냈는가)
     send_p50_ms: float
     send_p99_ms: float
@@ -517,6 +504,7 @@ def measure_rate(ad: G1Adapter, target_hz: float, duration_s: float,
     state_ts: list[int] = []
     state_gaps: list[float] = []
 
+    ad.reset_ack()
     t_start = time.perf_counter()
     next_t = t_start
     last_send = None
@@ -564,6 +552,8 @@ def measure_rate(ad: G1Adapter, target_hz: float, duration_s: float,
         n_commands=n,
         with_read=do_read,
         state_hz=(uniq * achieved) if state_ts else float("nan"),
+        ack_frac=ad.ack_frac(),
+        ack_bad=", ".join(f"{k}×{v}" for k, v in ad.ack_bad.items()),
         send_p50_ms=p50,
         send_p99_ms=p99,
         send_p999_ms=pct(sg, 0.999) if sg else float("nan"),
@@ -654,25 +644,33 @@ class ReplanResult:
 
 def measure_replan(ad: G1Adapter, trials: int, amplitude_rad: float,
                    center_rad: float, hold_s: float = 0.6,
-                   horizon_s: float = 0.4) -> Optional[ReplanResult]:
-    """PART C — `execute_joint_trajectory` + TARGET_TYPE_OVERRIDE 재계획 지연.
+                   horizon_s: float = 0.4,
+                   stop_first: bool = False) -> Optional[ReplanResult]:
+    """PART C — 궤적 재발행이 실제 운동에 반영되기까지의 지연.
 
     왜 PART A 와 별개인가
     ─────────────────────
     PART A 는 "Python 이 얼마나 빨리 때릴 수 있나"를 잰다. 그런데 SDK 에는
-    궤적 큐를 통째로 덮어쓰는 경로가 따로 있다. 그 경로에서는 상위가 5Hz 로만
+    궤적을 통째로 발행하는 경로가 따로 있다. 그 경로에서는 상위가 5Hz 로만
     보내도 **온보드가 보간**하므로, 상위 rate 천장이 낮다는 사실 자체는
     분리 전제를 죽이지 않는다.
 
-    대신 그 경로에서 진짜 병목은 **덮어쓰기가 실제 운동에 반영되기까지의 지연**이다.
-    이게 크면 접촉 반응이 늦고, 그건 rate 를 아무리 올려도 해결되지 않는다.
-    action chunk 를 5Hz 로 갈아끼우는 설계에서 이 값이 200ms 를 넘으면
-    "청크 경계마다 이미 지난 상황에 반응"하게 된다.
+    대신 그 경로의 진짜 병목은 **재발행이 실제 운동에 반영되기까지의 지연**이다.
+    이건 rate 를 올려도 해결되지 않는다. action chunk 를 5Hz 로 갈아끼우는
+    설계에서 이 값이 200ms 를 넘으면 "청크 경계마다 이미 지난 상황에 반응"한다.
 
-    측정: 중심에서 정지 → 계단 궤적을 OVERRIDE 로 투입 → 위치가 임계를 넘는
-    첫 순간까지의 시간. 폴링으로 검출하므로 폴링 주기가 분해능 하한이다.
+    ⚠️ 2026-07-31 정정 — TARGET_TYPE_OVERRIDE 는 `execute_joint_trajectory` 의
+    인자가 **아니다.** 실물 시그니처는 `(trajectory, is_blocking=True)` 뿐이고,
+    TARGET_TYPE_* 는 TargetConfig → TargetGroupTrajectory → SingoriXTarget →
+    publish_target 경로 소속이다 (SingoriXTarget 필드 미확인이라 아직 못 탄다).
+    그래서 덮어쓰기 의미론을 **실측으로** 확인한다:
+
+      stop_first=False : 실행 중에 그냥 재발행 → 대체되는가, 큐에 쌓이는가
+      stop_first=True  : stop_trajectory_execution() 후 발행 → 명시적 취소 비용
+
+    두 값의 차이가 곧 큐 의미론에 대한 증거다. 둘 다 재는 이유가 이것이다.
     """
-    if not ad.send_trajectory([horizon_s], [center_rad]):
+    if not ad.send_trajectory([horizon_s], [center_rad], stop_first=stop_first):
         return None
 
     thresh = 0.10 * abs(amplitude_rad)
@@ -686,17 +684,17 @@ def measure_replan(ad: G1Adapter, trials: int, amplitude_rad: float,
 
     for k in range(trials):
         # 홀드: 중심으로 안정화. sleep 을 넣어 SDK 를 불필요하게 두들기지 않는다.
-        ad.send_trajectory([horizon_s], [center_rad])
+        ad.send_trajectory([horizon_s], [center_rad], stop_first=stop_first)
         t_end = time.perf_counter() + hold_s
         while time.perf_counter() < t_end:
             ad.read_state()
             time.sleep(poll_dt)
         _, base, _ = ad.read_state()
 
-        # 계단을 OVERRIDE 로 투입
+        # 계단 궤적을 재발행 — 이게 기존 궤적을 대체하는지가 측정 대상이다
         target = center_rad + (amplitude_rad if k % 2 == 0 else -amplitude_rad)
         t0 = time.perf_counter()
-        if not ad.send_trajectory([horizon_s], [target]):
+        if not ad.send_trajectory([horizon_s], [target], stop_first=stop_first):
             fails += 1
             continue
 
@@ -760,11 +758,18 @@ def verdict(rates: list[RateResult], bode: list[BodePoint],
     fire-and-forget 비동기 publish 라면 로봇이 실제로 실행했는지와 무관하게
     올라가고, 그러면 천장이 부풀려져 **거짓 PASS** 가 난다.
 
-    이걸 반증할 유일한 증거는 **로봇이 제공한 타임스탬프로 본 상태 갱신률**이다.
-    로봇 타임스탬프가 없으면(호스트 시계 대체) 그 증거가 원리적으로 없으므로
-    천장을 PASS 로 승인하지 않고 `unconfirmed` 로 강등한다.
+    원래는 로봇 타임스탬프로 상태 갱신률을 보려 했으나, 2026-07-31 실물 확인
+    결과 **`JointState` 에 timestamp 필드가 없다** (acceleration/current/
+    effort/position/velocity 뿐). 그 채널은 이 SDK 에서 원리적으로 불가능하다.
+
+    대신 모든 `set_*` 가 **ControlStatus 를 반환**한다. SUCCESS 비율이 떨어지기
+    시작하는 지점이 실제 수락 천장이다. 완전한 "실행됨" 증거는 아니지만
+    (fire-and-forget 이면 SUCCESS 도 즉시 돌아올 수 있다) PUBLISH_FAIL /
+    COMM_DISCONNECTED / TIMEOUT 은 확실히 잡는다. 그래서 천장 승인 조건을
+    **ack ≥ 99%** 로 둔다. ack 가 무너지는 rate 는 천장이 아니다.
     """
     device_ts = ts_source.startswith("device")
+    ACK_MIN = 0.99
 
     # 경로 A 천장은 send-only 램프가 있으면 그쪽을 쓴다 (read 오염 제거)
     send_only = [r for r in rates if not r.with_read]
@@ -775,12 +780,26 @@ def verdict(rates: list[RateResult], bode: list[BodePoint],
           and (math.isnan(r.jitter_ratio) or r.jitter_ratio < 2.0)]
     ceiling = max((r.target_hz for r in ok), default=0.0)
 
-    # 관측 가능한 천장 — 로봇 타임스탬프가 있을 때만 의미가 있다
+    # ack 가 살아 있는 천장 — 이 SDK 에서 실제로 쓸 수 있는 관측 증거
+    acked = [r for r in pool
+             if r.achieved_hz >= 0.9 * r.target_hz
+             and (math.isnan(r.jitter_ratio) or r.jitter_ratio < 2.0)
+             and (math.isnan(r.ack_frac) or r.ack_frac >= ACK_MIN)]
+    ack_ceiling = max((r.target_hz for r in acked), default=0.0)
+
+    # 상태 갱신률 기반 천장 — 로봇 타임스탬프가 있어야만 의미가 있다.
+    # 이 SDK 에는 없으므로 실물에서는 항상 0 이다.
     obs = [r for r in rates
            if r.with_read and not math.isnan(r.state_hz)
            and r.state_hz >= 0.9 * r.target_hz]
     state_ceiling = max((r.target_hz for r in obs), default=0.0)
-    ceiling_confirmed = bool(device_ts and state_ceiling >= ceiling > 0)
+
+    have_ack = any(not math.isnan(r.ack_frac) for r in pool)
+    ceiling_confirmed = bool(
+        (device_ts and state_ceiling >= ceiling > 0)
+        or (have_ack and ack_ceiling >= ceiling > 0))
+    if have_ack and ack_ceiling < ceiling:
+        ceiling = ack_ceiling      # ack 가 무너진 rate 는 천장이 아니다
 
     bw = None
     for p in bode:
@@ -832,7 +851,10 @@ def verdict(rates: list[RateResult], bode: list[BodePoint],
         "command_ceiling_hz": ceiling,
         "command_ceiling_source": "send-only 램프" if send_only else "send+read 램프",
         "state_ceiling_hz": state_ceiling,
+        "ack_ceiling_hz": ack_ceiling,
         "ceiling_confirmed": ceiling_confirmed,
+        "confirmation_channel": ("ControlStatus ack" if have_ack
+                                 else "로봇 타임스탬프" if device_ts else "없음"),
         "state_timestamp_source": ts_source,
         "tracking_bandwidth_3db_hz": bw,
         "replan_latency_p50_ms": replan.latency_p50_ms if replan else None,
@@ -855,6 +877,13 @@ def main() -> int:
                     choices=["onboard", "external", "unspecified"],
                     help="측정 위치 (결과에 기록됨)")
     ap.add_argument("--joint", default="left_arm_joint4")
+    ap.add_argument("--send-api", default="commands",
+                    choices=["commands", "positions"],
+                    help="경로 A 에 쓸 API. commands=set_joint_commands "
+                         "(time_from_start_s 지정 가능), positions=set_joint_positions")
+    ap.add_argument("--horizon-s", type=float, default=0.1,
+                    help="set_joint_commands 의 time_from_start_s. "
+                         "SDK 기본 10.0 초는 고속 스트리밍에 쓸 수 없다")
     ap.add_argument("--amp-deg", type=float, default=2.0, help="진폭 (도)")
     ap.add_argument("--center-deg", type=float, default=0.0)
     ap.add_argument("--dwell", type=float, default=6.0, help="rate당 측정 시간 (초)")
@@ -865,7 +894,9 @@ def main() -> int:
                     choices=["both", "send-only", "send-read"],
                     help="PART A 램프 방식. both 면 두 번 돌려 천장을 병기한다")
     ap.add_argument("--skip-replan", action="store_true",
-                    help="PART C(궤적 덮어쓰기 재계획 지연) 건너뜀")
+                    help="PART C(궤적 재발행 지연) 건너뜀")
+    ap.add_argument("--skip-stopfirst", action="store_true",
+                    help="PART C 의 stop_trajectory_execution 변형만 건너뜀")
     ap.add_argument("--replan-trials", type=int, default=12)
     ap.add_argument("--out", default="gate1_results.json")
     args = ap.parse_args()
@@ -893,7 +924,8 @@ def main() -> int:
             return 1
     print()
 
-    ad = G1Adapter(dry_run=args.dry_run, joint_name=args.joint)
+    ad = G1Adapter(dry_run=args.dry_run, joint_name=args.joint,
+                   horizon_s=args.horizon_s, send_api=args.send_api)
     ad.prime()
     results = {
         "meta": {
@@ -905,6 +937,8 @@ def main() -> int:
             "unix_time": time.time(),
             # 어떤 호출 패턴이 실제로 통했는지 — 재현과 어댑터 확정에 필요
             "resolved_calls": dict(ad.resolved),
+            "send_api": args.send_api,
+            "time_from_start_s": args.horizon_s,
             # ⚠️ 이 값이 host_monotonic 이면 state_dt_*/unique_state_frac 은
             #    로봇이 아니라 우리 루프를 재는 값이다
             "state_timestamp_source": ad.ts_source,
@@ -924,18 +958,24 @@ def main() -> int:
         for do_read, label in modes:
             print(f"\n── PART A — 명령 rate 램프 · {label} " + "─" * 18)
             print(f"{'target':>8} {'achieved':>9} {'p50':>8} {'p99':>8} {'p99.9':>8} "
-                  f"{'max':>8} {'jitter':>7} {'state_uniq':>11} {'state_hz':>9}")
+                  f"{'max':>8} {'jitter':>7} {'state_hz':>9} {'ack':>7}")
             for hz in rates:
                 r = measure_rate(ad, hz, args.dwell, amp, center, do_read=do_read)
                 rate_results.append(r)
-                uq = "—" if math.isnan(r.unique_state_frac) else f"{r.unique_state_frac:.2f}"
                 sh = "—" if math.isnan(r.state_hz) else f"{r.state_hz:.1f}"
+                ak = "—" if math.isnan(r.ack_frac) else f"{r.ack_frac*100:.1f}%"
                 print(f"{r.target_hz:8.0f} {r.achieved_hz:9.1f} {r.send_p50_ms:8.2f} "
                       f"{r.send_p99_ms:8.2f} {r.send_p999_ms:8.2f} {r.send_max_ms:8.2f} "
-                      f"{r.jitter_ratio:7.2f} {uq:>11} {sh:>9}")
+                      f"{r.jitter_ratio:7.2f} {sh:>9} {ak:>7}"
+                      + (f"   ⚠️ {r.ack_bad}" if r.ack_bad else ""))
                 # 목표의 절반도 못 내면 천장을 지난 것
                 if r.achieved_hz < 0.5 * r.target_hz:
                     print(f"  → 달성률 50% 미만. 천장 통과로 보고 램프 중단.")
+                    break
+                # ack 가 무너지면 그 위는 재도 의미가 없다
+                if not math.isnan(r.ack_frac) and r.ack_frac < 0.5:
+                    print(f"  → ack {r.ack_frac*100:.0f}%. 로봇이 명령을 거부하기 "
+                          f"시작했으므로 램프 중단.")
                     break
         results["rate_ramp"] = [asdict(r) for r in rate_results]
 
@@ -947,20 +987,46 @@ def main() -> int:
 
         replan: Optional[ReplanResult] = None
         if not args.skip_replan:
-            print("\n── PART C — 궤적 덮어쓰기 재계획 지연 " + "─" * 26)
-            print("   execute_joint_trajectory + TARGET_TYPE_OVERRIDE")
-            replan = measure_replan(ad, args.replan_trials, amp, center)
-            if replan is None:
-                print("   건너뜀 — 궤적 경로를 쓸 수 없습니다.")
-                print("   (미지원인지 시그니처 미확인인지는 위 진단을 보십시오.")
-                print("    후자면 probe_sdk.py 로 확정 후 재측정하면 판정이 바뀔 수 있습니다.)")
-            else:
-                results["replan"] = asdict(replan)
-                results["meta"]["trajectory_call"] = ad.resolved.get("trajectory")
-                print(f"   p50 {replan.latency_p50_ms:.2f} ms · "
-                      f"p95 {replan.latency_p95_ms:.2f} ms · "
-                      f"max {replan.latency_max_ms:.2f} ms  "
-                      f"(폴링 {replan.poll_hz:.0f} Hz, 실패 {replan.failures})")
+            print("\n── PART C — 궤적 재발행 지연 " + "─" * 34)
+            print("   execute_joint_trajectory(Trajectory, is_blocking=False)")
+            print("   ⚠️ TARGET_TYPE_OVERRIDE 는 이 호출의 인자가 아니다 —")
+            print("      SingoriXTarget 경로 소속. 덮어쓰기 의미론을 실측한다.")
+            variants = [(False, "재발행만 (대체되는가?)")]
+            if not args.skip_stopfirst:
+                variants.append((True, "stop_trajectory_execution 후 재발행"))
+
+            for sf, label in variants:
+                print(f"\n   [{label}]")
+                r = measure_replan(ad, args.replan_trials, amp, center,
+                                   stop_first=sf)
+                if r is None:
+                    print("   건너뜀 — 궤적 경로를 쓸 수 없습니다 (위 진단 참조).")
+                    continue
+                key = "replan_stopfirst" if sf else "replan"
+                results[key] = asdict(r)
+                if not sf:
+                    replan = r
+                print(f"   p50 {r.latency_p50_ms:.2f} ms · "
+                      f"p95 {r.latency_p95_ms:.2f} ms · "
+                      f"max {r.latency_max_ms:.2f} ms  "
+                      f"(폴링 {r.poll_hz:.0f} Hz, 실패 {r.failures})")
+                st = ad.traj_status()
+                if st:
+                    print(f"   궤적 상태: {st}")
+
+            results["meta"]["trajectory_call"] = ad.resolved.get("trajectory")
+            if "replan" in results and "replan_stopfirst" in results:
+                d = (results["replan_stopfirst"]["latency_p50_ms"]
+                     - results["replan"]["latency_p50_ms"])
+                print(f"\n   두 방식 차이 {d:+.1f} ms →", end=" ")
+                if abs(d) < 5:
+                    print("사실상 동일. 재발행이 그 자체로 대체한다고 볼 수 있다.")
+                elif d > 0:
+                    print("명시적 stop 이 더 느리다. 그냥 재발행하는 편이 낫다.")
+                else:
+                    print("stop 이 더 빠르다 → 재발행만으로는 큐에 쌓일 가능성.")
+
+            if replan is not None:
                 if args.dry_run:
                     err = abs(replan.latency_p50_ms - SIM_TRANSPORT_S * 1e3)
                     ok = err < 15.0
@@ -972,8 +1038,17 @@ def main() -> int:
         # 손목 F/T 가 실제로 값을 주는지 여기서 한 번 확인해둔다 (회사 방문 1회 절약)
         w = ad.read_wrench()
         if w is not None:
-            results["wrench_sample"] = w
-            print(f"\n  손목 F/T 표본: {[round(x, 3) for x in w]}")
+            results["wrench_sample"] = {k: str(v)[:120] for k, v in w.items()} \
+                if isinstance(w, dict) else str(w)[:400]
+            print(f"\n  손목 F/T 표본 ({type(w).__name__}):")
+            if isinstance(w, dict):
+                for k, val in w.items():
+                    print(f"    {k:22s} {str(val)[:80]}")
+                if "timestamp_ns" in w:
+                    print("    → timestamp_ns 있음. 관절 상태에는 없지만 F/T 에는 "
+                          "로봇 시계가 있다.")
+            else:
+                print(f"    {w}")
 
         v = verdict(rate_results, bode_results, replan, ts_source=ad.ts_source)
         results["verdict"] = v
@@ -984,7 +1059,9 @@ def main() -> int:
         print(f"  주 기준            : {v['primary_criterion']}")
         print(f"  명령 rate 천장     : {v['command_ceiling_hz']:.0f} Hz   (경로 A, "
               f"{v['command_ceiling_source']})")
-        print(f"  관측 가능 천장     : {v['state_ceiling_hz']:.0f} Hz   "
+        print(f"  ack 유지 천장      : {v['ack_ceiling_hz']:.0f} Hz   "
+              f"(확인 채널: {v['confirmation_channel']})")
+        print(f"  상태갱신 천장      : {v['state_ceiling_hz']:.0f} Hz   "
               f"→ 천장 확인 {'✅' if v['ceiling_confirmed'] else '❌ 미확인'}")
         bw = v["tracking_bandwidth_3db_hz"]
         print(f"  추종 대역폭(-3dB)  : {bw if bw else '측정 범위 내 없음'} Hz")
@@ -993,9 +1070,10 @@ def main() -> int:
         else:
             print(f"  재계획 지연        : 측정 못 함 (경로 B 미확보)")
         if ad.ts_source == "host_monotonic":
-            print(f"\n  ⚠️ 상태 타임스탬프가 호스트 시계입니다 — state_dt_*/unique_state_frac")
-            print(f"     은 로봇 응답이 아니라 우리 루프를 잰 값입니다. 그래서 천장을")
-            print(f"     '확인됨'으로 승격할 수 없습니다.")
+            print(f"\n  ℹ️ 상태 타임스탬프는 호스트 시계입니다 — 이 SDK 의 JointState 에는")
+            print(f"     timestamp 필드가 없습니다(실물 확인). state_dt_*/unique_state_frac")
+            print(f"     은 로봇 응답이 아니라 우리 루프를 잰 값이니 읽지 마십시오.")
+            print(f"     대신 ack 열(ControlStatus SUCCESS 비율)을 보십시오.")
         print(f"\n  → {v['verdict']}")
         print(f"     {v['implication']}")
 
