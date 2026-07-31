@@ -45,49 +45,135 @@ make test                     # 기구학 검증 6종 — 6/6 통과해야 함
 
 ## 2. 🏢 RTX 3090 (회사) — clone 후 바로
 
-### 2-1. 🔴 GATE-1 — SDK 폐루프 대역폭 **[최우선]**
+### 2-0. ⚠️ GalbotSDK 는 매번 `source` 가 필요합니다
+
+**이걸 안 하면 `import galbot_sdk` 가 실패합니다.** conda 환경만으로는 부족합니다 —
+SDK 가 `LD_LIBRARY_PATH` 와 `PYTHONPATH` 를 직접 세팅하기 때문입니다.
+
+```bash
+source /opt/galbot/galbot_sdk/linux-x86_64-gcc940/setup.sh
+conda activate physical_ai
+
+python -c "import galbot_sdk; print(galbot_sdk.__file__)"
+# → /opt/galbot/galbot_sdk/linux-x86_64-gcc940/lib/python/galbot_sdk/__init__.py
+```
+
+`make probe` / `make probe-live` / `make gate1-real` 은 이 source 를 자동으로 합니다.
+경로가 다르면 `make SDK_SETUP=/실제/경로/setup.sh probe`.
+
+`.bashrc` 에 넣어두면 편합니다.
+
+---
+
+### 2-1. 🔴 SDK 시그니처 확정 — **GATE-1 보다 먼저**
+
+`galbot_sdk` 는 **pybind11 확장 모듈**입니다. 그래서 `inspect.signature()` 가
+전부 `(?)` 로 나옵니다. **메서드 이름은 확정됐지만 인자는 아직 모릅니다.**
+실제 인자는 docstring 안에 문자열로 들어 있고, 그걸 긁는 도구가 있습니다.
+
+```bash
+# 0) 맥에서도 되는 자체 검증 (파서와 안전차단이 정상인지)
+make probe-check
+
+# 1) 정적 조사 — 로봇 불필요, 아무것도 안 움직임
+make probe
+#    → sdk_surface_<hostname>.json / .md
+
+# 2) 읽기 전용 실물 조회 — 로봇 전원 필요, 여전히 안 움직임
+make probe-live
+#    → sdk_live_<hostname>.json / .md
+```
+
+> **안전:** `probe_sdk.py` 는 `set_` / `move_` / `execute_` 로 시작하는 메서드를
+> **코드 레벨에서 하드 차단**합니다 (`_assert_readonly`). `make probe-check` 가
+> 그 차단이 실제로 작동하는지 검증합니다. 로봇은 움직이지 않습니다.
+
+**`probe-live` 가 한 번에 답해주는 것들** — 회사 방문 1회를 아낍니다:
+
+| 얻는 것 | 왜 중요한가 |
+|---|---|
+| `get_joint_names()` 실제 순서 | RoboCOIN(21-D) vs SDK 레이아웃 불일치로 이미 한 번 데였습니다. 이름으로 인덱싱하면 그 오염이 사라집니다 |
+| `get_force_sensor_data(LEFT_WRIST_FORCE)` 실값 | **손목 F/T 가 실제로 붙어 있고 값을 주는지** — §6 항목 3 |
+| `get_gripper_state()` / `get_suction_cup_state()` | **엔드이펙터 좌우 구성** 단서 — §6 항목 1 |
+| `get_sensor_extrinsic(...)` | **헤드 카메라 extrinsic** — §7 항목 3이 벤더 문의에서 자체 확인으로 |
+| `GalbotMotion.forward_kinematics_by_state` | **SDK FK 와 우리 FK 대조** — URDF만으로 유도한 우리 FK가 어긋나면 조용히 깨집니다 |
+
+**📩 알려주실 것**: `sdk_surface_*.md` 와 `sdk_live_*.md` 파일 그대로.
+
+---
+
+### 2-2. 🔴 GATE-1 — SDK 폐루프 대역폭 **[최우선 측정]**
 
 **이 프로젝트에서 가장 중요한 단일 측정입니다.** 결과에 따라 아키텍처 전제가 바뀝니다.
 
 ```bash
-# 1) 먼저 드라이런으로 스크립트가 도는지만 확인 (로봇 불필요)
-python tools/measure_loop_rate.py --dry-run
+# 1) 드라이런 — 로봇 불필요. 스크립트 로직만 검증
+make gate1
 
-# 2) SDK 어댑터를 실물에 맞게 수정
-#    tools/measure_loop_rate.py 의 G1Adapter 클래스만 고치면 됩니다.
-#    "⚠️ 확인 필요" 로 표시된 3곳:
-#      - from galbot_sdk import Robot   (실제 모듈/클래스명)
-#      - Robot() 생성자 인자 (IP 등)
-#      - robot.get_joint_state / set_joint_commands 시그니처
+# 2) 실제 측정 (3090, 다른 부하 없을 때!)
+make gate1-real HOST=external
 
-# 3) 실제 측정 — 3090에서 (다른 부하 없을 때!)
-python tools/measure_loop_rate.py --host external --out results_3090.json
-
-# 4) 로봇 온보드에서도 (SSH로 들어가서)
-python tools/measure_loop_rate.py --host onboard --out results_onboard.json
+# 3) 로봇 온보드에서도
+make gate1-real HOST=onboard
 ```
 
 > ⚠️ **측정 중 그 머신에서 다른 워크로드를 돌리지 마십시오.** jitter를 재는 것이라 p99/p99.9가 오염됩니다.
 > ⚠️ **안전:** 단일 관절(`left_arm_joint4`)만 ±2°로 움직입니다. 팔 주변을 비우고 e-stop을 손 닿는 곳에.
 
-**📩 알려주실 것**
-```
-1. 스크립트가 자동 출력하는 "판정" 블록 전체
-2. results_3090.json / results_onboard.json 파일
-3. G1Adapter 를 어떻게 고쳤는지 (실제 API 이름)
-```
+**2026-07-31 개정 — 명령 경로가 둘이라는 게 드러났습니다.**
+
+SDK 표면을 실제로 보니 `TARGET_TYPE_OVERRIDE` / `PROVERRIDE` / `PREPENDNOW` 라는
+**궤적 큐 덮어쓰기** 의미론이 따로 있었습니다. 그래서 측정을 3부로 나눴습니다.
+
+| | 경로 | 재는 것 |
+|---|---|---|
+| **PART A** | `set_joint_commands` 고속 반복 | 명령 rate 천장 + jitter |
+| **PART B** | 동일 | 위치 추종 −3dB 대역폭 |
+| **PART C** | `execute_joint_trajectory` + `TARGET_TYPE_OVERRIDE` | **재계획 지연(replan latency)** |
+
+**왜 PART C 가 추가됐는가.** 기존 판정은 "Python이 100Hz를 못 내면 분리 전제 붕괴"였는데,
+그건 경로 A만 가정한 논리입니다. 경로 B가 실제로 동작하면 **상위가 5Hz로 보내도 온보드가
+보간**하므로 상위 rate 천장이 낮다는 사실 자체는 전제를 죽이지 않습니다. 대신 그 경로의
+진짜 병목은 **덮어쓰기가 실제 운동에 반영되기까지의 지연**입니다. 이건 rate를 올려도
+해결되지 않고, 이 값이 크면 청크 경계마다 이미 지난 상황에 반응하게 됩니다.
 
 **이 결과가 바꾸는 것**
 
-| 명령 rate 천장 | 결론 |
+경로 B가 살아 있으면 **그쪽이 주 판정 기준**이고, 경로 A 천장은 보조 지표로 내려갑니다.
+
+| 재계획 지연 p95 (경로 B) | 결론 |
+|---|---|
+| **≤50 ms** | ✅ 5Hz chunk 스트리밍 성립. 상위 rate가 낮아도 무방 |
+| 50–200 ms | 경계. 청크 주기를 그보다 길게 잡아야 하고 접촉 반응이 그만큼 늦음 |
+| **>200 ms** | 🔴 청크 경계마다 이미 지난 상황에 반응 |
+
+경로 B를 못 쓸 때만 기존 기준을 적용합니다.
+
+| 명령 rate 천장 (경로 A) | 결론 |
 |---|---|
 | **≥100 Hz** | admittance 작동. 2모델 분리 유지 가능 |
 | 50–100 Hz | 경계. 접촉 작업 범위를 서면으로 한정 |
 | **<50 Hz** | 🔴 **분리 전제 붕괴.** 단일 모델 + 벤더 WBC로 전환 |
 
+> ⚠️ 경로 B 실패가 **"미지원"인지 "시그니처 미확인"인지 구분해야 합니다.** 후자면
+> `make probe` 로 확정한 뒤 재측정하십시오 — **판정이 뒤집힐 수 있습니다.**
+> 스크립트가 실패 시 해당 메서드의 docstring 을 그대로 출력하므로 그걸 보내주시면 됩니다.
+
+**📩 알려주실 것**
+```
+1. 스크립트가 자동 출력하는 "판정" 블록 전체
+2. gate1_results_*.json 파일
+3. PART C 가 건너뛰어졌다면 그때 출력된 docstring 진단 블록
+4. 판정 블록에 "상태 타임스탬프가 호스트 시계" 경고가 떴는지 여부
+```
+
+> **왜 4번을 묻는가:** 로봇이 자체 타임스탬프를 안 주면 호스트 시계로 대체하는데,
+> 그러면 `state_dt_*` / `unique_state_frac` 은 **로봇 응답이 아니라 우리 루프**를
+> 재는 값이 됩니다. 그걸 모르고 보면 stale 상태를 건강한 것으로 오독합니다.
+
 ---
 
-### 2-2. 🔴 컨버터 포크 검증 — **데이터 수집 전 필수**
+### 2-3. 🔴 컨버터 포크 검증 — **데이터 수집 전 필수**
 
 F/T는 **기록된 에피소드에 소급 추가가 불가능합니다.** 에피소드 1개 받기 전에 끝나야 합니다.
 
@@ -113,7 +199,7 @@ python tools/mcap2lerobot_fork.py --input <mcap_dir> --output <out_dir>
 
 ---
 
-### 2-3. 학습 (게이트 통과 후)
+### 2-4. 학습 (게이트 통과 후)
 
 ```bash
 # RoboTwin 2.0 설치 후 — 7-DoF embodiment 가 있는지 확인 필요
@@ -214,27 +300,40 @@ free -h
 
 ## 6. 🏢 실기체 확인 항목 (회사 갈 때)
 
-코드 없이 눈으로 확인하는 것들입니다.
+**2026-07-31 갱신 — `make probe-live` 로 상당 부분이 자동 확인됩니다.**
+아래 표의 "probe" 열이 ✅ 면 눈으로 안 봐도 됩니다.
 
-| # | 확인할 것 | 왜 |
-|---|---|---|
-| **1** | **엔드이펙터 좌우 구성** — 양쪽 다 그리퍼인가, 한쪽이 석션컵인가 | 출처 3개가 답이 3개. **한쪽이 석션이면 양팔 협응 전제가 무너집니다** |
-| **2** | **텔레옵 리그가 bilateral 인가** — 로봇이 받는 힘을 조작자가 느끼는가 | unilateral이면 **wrench 채널에 학습 가능한 구조가 없습니다.** 힘 관련 계획 전체의 전제 |
-| **3** | 손목 F/T 실물 장착 확인 | 스펙엔 있으나 유닛별 확인 필요 |
-| **4** | 헤드 카메라가 스테레오 RGB인지 depth인지 | 매뉴얼과 논문이 충돌 |
+| # | 확인할 것 | probe | 왜 |
+|---|---|---|---|
+| **1** | **엔드이펙터 좌우 구성** — 양쪽 다 그리퍼인가, 한쪽이 석션컵인가 | 🟡 단서 | `get_gripper_state` / `get_suction_cup_state` / `get_dexterous_hand_state` 응답으로 좁혀지지만, **API 존재는 장착을 뜻하지 않습니다.** 최종은 육안 |
+| **2** | **텔레옵 리그가 bilateral 인가** — 로봇이 받는 힘을 조작자가 느끼는가 | ❌ | unilateral이면 **wrench 채널에 학습 가능한 구조가 없습니다.** 힘 관련 계획 전체의 전제. 육안·조작 확인 필수 |
+| **3** | 손목 F/T 실물 장착 + 실제 값 | ✅ | `get_force_sensor_data(LEFT/RIGHT_WRIST_FORCE)` 가 값을 주는지로 확정. 전부 0이면 미연결 의심 |
+| **4** | 헤드 카메라가 스테레오 RGB인지 depth인지 | 🟡 단서 | `SensorType` / `GalbotOneFoxtrotSensor` enum 멤버 이름으로 좁혀집니다 |
+
+> **2번이 남는 이유:** SDK는 로봇 쪽만 보여줍니다. 조작자가 힘을 느끼는지는
+> 리그 하드웨어 문제라 API로 알 수 없습니다.
 
 ---
 
 ## 7. 벤더 문의 (영업/FAE)
 
-공개 소스로는 불가능한 것들입니다.
+**2026-07-31 갱신 — SDK 표면 확인으로 일부가 자체 해결되거나 질문이 날카로워졌습니다.**
 
-1. 🔴 **`*_PVT_BYPASS_CTRL` semantics** — "bypass"가 effort나 Kp/Kd를 전달하는가
-   → **전달하면 컴플라이언스 지향 Model 2가 되살아납니다. 가장 가치 높은 질문**
-2. **F/T 데이터시트** — 범위/분해능/노이즈/샘플레이트/마운팅 프레임, **중력·페이로드 보상 여부**
-3. **헤드 카메라 extrinsic** (`head_link2` 기준) + 모델/FOV/스테레오 baseline
-4. **세대 확인** (Charlie / Foxtrot / Golf / `G1_V2.2B`) — 세대 간 관절 수가 다름
-5. **안전 인증** — ISO 10218 / 13849 PL / TS 15066 / TÜV / CE
+1. 🔴 **`TARGET_DATA_JOINT_EFFORT` / `TARGET_DATA_FRAME_WRENCH` 가 G1 팔에서 실제로 지원되는가**
+   → SDK enum 에 **존재는 합니다.** 그런데 에러 코드에 `UNSUPPORTED_FUNCRION` 이 있으므로
+   **선언 ≠ 지원**입니다. 지원된다면 **컴플라이언스 지향 Model 2가 되살아납니다.**
+   기존의 `*_PVT_BYPASS_CTRL` 질문을 대체하는, **가장 가치 높은 질문**입니다.
+   *(자체 확인도 가능하지만 실기체에 effort를 넣는 실험이라 벤더 답을 먼저 받는 편이 안전)*
+2. 🔴 **`TARGET_TYPE_OVERRIDE` / `PROVERRIDE` / `PREPENDNOW` 의 정확한 의미론**
+   → 큐를 어디서부터 자르는가, 현재 실행 중인 점을 어떻게 이어붙이는가.
+   **action chunk 스트리밍 설계가 여기 직접 걸립니다.** GATE-1 PART C가 실측하지만
+   의미론은 문서로 확인해야 합니다
+3. **F/T 데이터시트** — 범위/분해능/노이즈/샘플레이트/마운팅 프레임, **중력·페이로드 보상 여부**
+   → 값은 `probe-live` 로 얻지만 **보상 여부는 값만 봐선 모릅니다.** 이건 남습니다
+4. ~~**헤드 카메라 extrinsic**~~ → ✅ **`get_sensor_extrinsic()` 로 자체 확인.** 문의 불필요
+5. **세대 확인** → 🟡 클래스명이 `GalbotOne**Foxtrot**Sensor` 이므로 **Foxtrot 세대**로
+   보입니다. 관절 수는 `get_joint_names()` 로 확정. 정식 모델명만 확인하면 됩니다
+6. **안전 인증** — ISO 10218 / 13849 PL / TS 15066 / TÜV / CE
 
 ---
 
@@ -256,12 +355,19 @@ free -h
 
 ## 9. 우선순위 — 시간이 없다면
 
-| 순위 | 작업 | 기계 | 이유 |
-|---|---|---|---|
-| **1** | GATE-1 루프 레이트 | 3090 + 로봇 | 아키텍처 전제를 죽일 수 있음 |
-| **2** | 컨버터 포크 검증 | 3090 + 로봇 | **수집 시작하면 소급 불가** |
-| **3** | 엔드이펙터 좌우 확인 | 실기체 | 양팔 전제 |
-| **4** | E0 | 1660 | 가설 자체를 죽일 수 있음 |
-| **5** | RoboCOIN 3종 | Mac/1660 | 헤드 프레임·ψ 결정 |
+| 순위 | 작업 | 기계 | 로봇 | 이유 |
+|---|---|---|---|---|
+| **0** | `make probe` SDK 시그니처 | 3090 | ❌ 불필요 | **몇 분이면 끝나고 1·2를 동시에 풉니다.** 이게 먼저 |
+| **1** | `make probe-live` | 3090 + 로봇 | 전원만 | 손목 F/T·관절 순서·카메라 extrinsic·엔드이펙터를 **안 움직이고** 한 번에 |
+| **2** | GATE-1 (PART A/B/C) | 3090 + 로봇 | ⚠️ 움직임 | 아키텍처 전제를 죽일 수 있음 |
+| **3** | 컨버터 포크 검증 | 3090 + 로봇 | 수집 | **수집 시작하면 소급 불가** |
+| **4** | 텔레옵 리그 bilateral 확인 | 실기체 | 육안 | API로 알 수 없는 유일한 항목 |
+| **5** | E0 | 1660 | ❌ | 가설 자체를 죽일 수 있음 |
+| **6** | RoboCOIN 3종 | Mac/1660 | ❌ | 헤드 프레임·ψ 결정 |
 
-**1과 4는 서로 독립이라 병렬 가능합니다.** 회사에서 1·2·3을 하고, 집에서 4·5를 돌리면 일주일 안에 큰 불확실성 대부분이 닫힙니다.
+**0번을 먼저 하십시오.** 로봇도 필요 없고 몇 분이면 끝나는데, 그 결과가 GATE-1 어댑터를
+확정해서 2번의 실패 위험을 없앱니다. 지금은 메서드 **이름만** 알고 **인자는 모르는** 상태라,
+0번 없이 2번을 돌리면 패턴 사다리에 걸려 시간만 씁니다.
+
+**2와 5는 서로 독립이라 병렬 가능합니다.** 회사에서 0·1·2·3·4를 하고, 집에서 5·6을 돌리면
+일주일 안에 큰 불확실성 대부분이 닫힙니다.

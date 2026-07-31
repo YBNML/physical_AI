@@ -44,77 +44,379 @@ from typing import Callable, Optional
 # ─────────────────────────────────────────────────────────────────────────────
 # SDK 어댑터
 #
-# ⚠️ 확인 필요 — 아래 import 경로와 메서드 시그니처는 공개 문서에서 확인한
-#    이름을 근거로 작성했으나 실물 SDK로 검증하지 못했다. 회사에서 첫 실행 시
-#    이 클래스만 고치면 나머지는 그대로 동작한다.
+# 2026-07-31 갱신 — 실물 SDK 표면을 3090에서 확인했다. **클래스/메서드 이름은 확정.**
 #
-# 문서에서 확인된 것:
-#   - robot.set_joint_commands(...)  : 표준 관절은 position만 유효
-#                                      (velocity/acceleration/effort는 무시됨)
-#   - JointState 에 timestamp_ns, position, velocity, effort, current 존재
-#   - 그리퍼 관절만 velocity/effort 유효
+#   설치: /opt/galbot/galbot_sdk/linux-x86_64-gcc940/lib/python/galbot_sdk/
+#   ⚠️ import 전에 반드시 (안 하면 ImportError):
+#       source /opt/galbot/galbot_sdk/linux-x86_64-gcc940/setup.sh
+#
+#   GalbotRobot — 하드웨어 저수준. 확인된 메서드:
+#       get_joint_names / get_joint_group_names / get_joint_positions / get_joint_states
+#       set_joint_commands / set_joint_commands_batch / set_joint_positions
+#       execute_joint_trajectory
+#       get_force_sensor_data          ← 손목 F/T
+#       get_gripper_state / set_gripper_command / get_sensor_extrinsic
+#
+#   손목 F/T 센서 id: GalbotOneFoxtrotSensor.LEFT_WRIST_FORCE / RIGHT_WRIST_FORCE
+#
+#   명령 경로가 **두 개**다 (이 스크립트가 둘 다 잰다):
+#       direct     — set_joint_commands 를 고속 반복        → PART A/B
+#       trajectory — execute_joint_trajectory + TARGET_TYPE_OVERRIDE → PART C
+#
+# ⚠️ 아직 모르는 것: **인자 시그니처.** galbot_sdk 는 pybind11 확장이라
+#    inspect.signature() 가 전부 실패한다 (`(?)` 만 나옴). 실제 인자는 docstring 에
+#    들어 있으므로 먼저 이걸 돌려 확정하십시오:
+#
+#        python tools/probe_sdk.py --focus
+#
+#    확정 전까지 아래 코드는 **호출 패턴 사다리**를 순서대로 시도하고, 전부 실패하면
+#    해당 메서드의 docstring 을 그대로 출력한다. 추측으로 한 패턴만 박아두면
+#    틀렸을 때 원인을 알 수 없기 때문이다.
 # ─────────────────────────────────────────────────────────────────────────────
+
+SDK_SETUP = "/opt/galbot/galbot_sdk/linux-x86_64-gcc940/setup.sh"
+
+# 드라이런 전용 — 궤적 덮어쓰기의 가짜 전송 지연. PART C 가 이 값을 되찾아내면
+# 측정 코드가 옳다는 뜻이다 (로봇 없이 검증하는 방법).
+SIM_TRANSPORT_S = 0.035
+
+
+def _doc(obj: object) -> str:
+    return (getattr(obj, "__doc__", None) or "(docstring 없음)").strip()[:900]
+
+
+class SDKCallFailed(RuntimeError):
+    """호출 패턴을 전부 실패. docstring 을 담아 다음 수정을 안내한다."""
+
+    def __init__(self, name: str, fn: object, tried: list[tuple[str, str]]):
+        lines = [
+            f"[adapter] `{name}` 호출 패턴을 전부 실패했습니다.",
+            "",
+            "시도한 것:",
+        ]
+        lines += [f"  - {pat}\n      → {err}" for pat, err in tried]
+        lines += [
+            "",
+            f"`{name}` 의 실제 시그니처 (pybind11 docstring):",
+            "─" * 70,
+            _doc(fn),
+            "─" * 70,
+            "",
+            "이 출력을 그대로 공유해주시면 어댑터를 확정합니다.",
+            "전체 표면을 한 번에 뜨려면:  python tools/probe_sdk.py --focus",
+        ]
+        super().__init__("\n".join(lines))
+
+
+def _try_patterns(name: str, fn, patterns: list[tuple[str, tuple, dict]]):
+    """(라벨, args, kwargs) 사다리를 순서대로 시도. 첫 성공을 반환."""
+    tried: list[tuple[str, str]] = []
+    for label, a, kw in patterns:
+        try:
+            return fn(*a, **kw), label
+        except Exception as e:
+            tried.append((label, f"{type(e).__name__}: {e}"[:200]))
+    raise SDKCallFailed(name, fn, tried)
 
 
 class G1Adapter:
-    """GalbotSDK 래퍼. 실물 API에 맞춰 이 클래스만 수정하면 된다."""
+    """GalbotSDK 래퍼.
 
-    def __init__(self, dry_run: bool = False, joint_name: str = "left_arm_joint4"):
+    실물 시그니처가 확정되면 `_resolve_*` 메서드의 패턴 사다리를 확정된 하나로
+    줄이면 된다. 나머지 측정 코드는 손댈 필요 없다.
+    """
+
+    def __init__(self, dry_run: bool = False, joint_name: str = "left_arm_joint4",
+                 tau_s: float = 0.015):
         self.dry_run = dry_run
         self.joint_name = joint_name
         self._robot = None
+        self._sdk = None
+        self._joint_names: list[str] = []
+        self._joint_idx: Optional[int] = None
         self._sim_pos = 0.0
+        self._sim_tau = tau_s
         self._sim_t0 = time.perf_counter()
 
+        # 어떤 호출 패턴이 실제로 통했는지 — 결과 JSON 에 기록해 재현 가능하게
+        self.resolved: dict[str, str] = {}
+        # 상태 타임스탬프가 로봇 것인지 호스트 것인지. 이게 결과 해석을 바꾼다.
+        self.ts_source = "sim" if dry_run else "unknown"
+        self.traj_supported: Optional[bool] = None
+
         if dry_run:
-            print("[adapter] DRY-RUN — 1차 지연 플랜트를 시뮬레이션합니다 (로봇 없음)")
+            print(f"[adapter] DRY-RUN — 1차 지연 플랜트 시뮬레이션 (tau={tau_s*1e3:.0f}ms)")
             return
 
-        # ── 여기부터 실물 SDK ────────────────────────────────────────────────
+        self._connect_real()
+
+    # ── 연결 ────────────────────────────────────────────────────────────────
+    def _connect_real(self) -> None:
         try:
-            from galbot_sdk import Robot  # ⚠️ 확인 필요: 실제 모듈/클래스명
+            import galbot_sdk as sdk
         except ImportError as e:
             sys.exit(
-                f"[adapter] GalbotSDK import 실패: {e}\n"
-                "  - SDK는 Linux 전용입니다 (ubuntu 20-24, x86_64 또는 aarch64)\n"
-                "  - Mac에서는 실행할 수 없습니다. --dry-run 으로 스크립트만 검증하십시오.\n"
-                "  - import 경로가 다르면 G1Adapter.__init__ 을 수정하십시오."
+                f"[adapter] GalbotSDK import 실패: {e}\n\n"
+                f"  SDK 환경을 먼저 로드해야 합니다:\n"
+                f"      source {SDK_SETUP}\n\n"
+                "  - SDK 는 Linux 전용입니다 (linux-x86_64 / linux-aarch64).\n"
+                "    Mac 에서는 --dry-run 으로 스크립트만 검증하십시오.\n"
+                "  - 경로가 다르면:  find /opt -maxdepth 6 -type d -name galbot_sdk\n"
             )
-        self._robot = Robot()          # ⚠️ 확인 필요: 생성자 인자 (IP 등)
-        self._robot.connect()          # ⚠️ 확인 필요: 연결 메서드명
+        self._sdk = sdk
+        print(f"[adapter] galbot_sdk {getattr(sdk, '__file__', '?')}")
+
+        robot, pat = _try_patterns(
+            "GalbotRobot()", sdk.GalbotRobot,
+            [("GalbotRobot()", (), {})]
+            + [(f"GalbotRobot(MachineType.{m})", (getattr(sdk.MachineType, m),), {})
+               for m in getattr(getattr(sdk, "MachineType", None), "__members__", {})],
+        )
+        self._robot = robot
+        self.resolved["ctor"] = pat
+        print(f"[adapter] 생성 OK — {pat}")
+
+        self._resolve_joint_index()
+        self._probe_state_timestamp()
+
+    def _resolve_joint_index(self) -> None:
+        """관절 이름 목록을 받아 우리가 흔들 관절의 인덱스를 찾는다.
+
+        이걸 먼저 하는 이유: RoboCOIN(21-D)과 SDK 관절 벡터의 레이아웃이 다르다는
+        걸 이미 한 번 데였다. 이름으로 인덱스를 잡으면 그 종류의 조용한 오염이 없다.
+        """
+        names, pat = _try_patterns(
+            "get_joint_names", self._robot.get_joint_names,
+            [("get_joint_names()", (), {})]
+            + [(f"get_joint_names(G1JointGroup.{m})",
+                (getattr(self._sdk.G1JointGroup, m),), {})
+               for m in getattr(getattr(self._sdk, "G1JointGroup", None),
+                                "__members__", {})],
+        )
+        self.resolved["get_joint_names"] = pat
+        self._joint_names = [str(n) for n in names]
+        print(f"[adapter] 관절 {len(self._joint_names)}개 — {pat}")
+
+        if self.joint_name in self._joint_names:
+            self._joint_idx = self._joint_names.index(self.joint_name)
+        else:
+            # 이름 규칙이 다를 수 있다 (left_arm_joint4 vs left_arm_joint_4 등)
+            key = self.joint_name.replace("_", "").lower()
+            hits = [i for i, n in enumerate(self._joint_names)
+                    if n.replace("_", "").lower() == key]
+            if not hits:
+                sys.exit(
+                    f"[adapter] 관절 '{self.joint_name}' 을 찾을 수 없습니다.\n"
+                    f"  SDK 가 보고한 관절 이름 {len(self._joint_names)}개:\n"
+                    + "\n".join(f"    [{i:2d}] {n}"
+                                for i, n in enumerate(self._joint_names))
+                    + f"\n\n  --joint <이름> 으로 정확한 이름을 지정하십시오."
+                )
+            self._joint_idx = hits[0]
+            self.joint_name = self._joint_names[hits[0]]
+            print(f"[adapter] 이름 정규화 → '{self.joint_name}'")
+        print(f"[adapter] 대상 관절 index {self._joint_idx}")
+
+    def _probe_state_timestamp(self) -> None:
+        """로봇이 자체 타임스탬프를 주는지 확인.
+
+        중요: 못 주면 호스트 시계로 대체하는데, 그러면 PART A 의 `unique_state_frac`
+        과 `state_dt_*` 는 **로봇이 아니라 우리 루프**를 재는 값이 된다. 그 차이를
+        모르고 보면 stale 상태를 건강한 것으로 오독한다. 그래서 결과에 명시한다.
+        """
+        try:
+            st, _ = _try_patterns(
+                "get_joint_states", self._robot.get_joint_states,
+                [("get_joint_states()", (), {})],
+            )
+            probe = st[0] if isinstance(st, (list, tuple)) and st else st
+            for attr in ("timestamp_ns", "timestamp", "stamp", "header"):
+                if hasattr(probe, attr):
+                    self.ts_source = f"device.{attr}"
+                    print(f"[adapter] 상태 타임스탬프: 로봇 제공 ({attr})")
+                    return
+        except Exception as e:
+            print(f"[adapter] get_joint_states 탐색 실패: {type(e).__name__}: {e}")
+        self.ts_source = "host_monotonic"
+        print("[adapter] ⚠️ 로봇 타임스탬프 없음 → 호스트 시계 사용.")
+        print("          state_dt_* / unique_state_frac 은 '로봇 응답'이 아니라")
+        print("          '우리 루프'를 재는 값이 됩니다. 판정 시 감안하십시오.")
 
     # ── 읽기 ────────────────────────────────────────────────────────────────
     def read_state(self) -> tuple[int, float, Optional[float]]:
-        """(timestamp_ns, position_rad, effort_Nm|None) 반환."""
+        """(timestamp_ns, position_rad, effort_Nm|None)."""
         if self.dry_run:
-            # 1차 지연 플랜트: tau=15ms, 100Hz 이상에서 위상 지연이 보이도록
-            now = time.perf_counter()
+            # 궤적 경로가 활성이면 여기서도 플랜트를 전진시킨다.
+            # (PART C 는 send 없이 read 만 반복하므로 이게 없으면 응답이 없다)
+            if self._sim_traj_at is not None:
+                now = time.perf_counter()
+                if now >= self._sim_traj_at:
+                    dt = now - max(self._sim_t0, self._sim_traj_at)
+                    if dt > 0:
+                        self._sim_t0 = now
+                        alpha = 1.0 - math.exp(-dt / self._sim_tau)
+                        self._sim_pos += alpha * (self._sim_target - self._sim_pos)
             return (time.monotonic_ns(), self._sim_pos, 0.0)
 
-        st = self._robot.get_joint_state(self.joint_name)   # ⚠️ 확인 필요
-        return (st.timestamp_ns, st.position, getattr(st, "effort", None))
+        try:
+            pos, pat = _try_patterns(
+                "get_joint_positions", self._robot.get_joint_positions,
+                [("get_joint_positions()", (), {})],
+            )
+            self.resolved.setdefault("get_joint_positions", pat)
+            p = float(pos[self._joint_idx])
+        except Exception:
+            st, pat = _try_patterns(
+                "get_joint_states", self._robot.get_joint_states,
+                [("get_joint_states()", (), {})],
+            )
+            self.resolved.setdefault("read", pat)
+            item = st[self._joint_idx] if isinstance(st, (list, tuple)) else st
+            p = float(getattr(item, "position", item))
 
-    # ── 쓰기 ────────────────────────────────────────────────────────────────
+        ts = time.monotonic_ns()
+        return (ts, p, None)
+
+    def read_wrench(self) -> Optional[list[float]]:
+        """손목 F/T. GATE-1 본체는 아니지만 여기서 한 번에 확인해둔다."""
+        if self.dry_run or self._robot is None:
+            return None
+        E = getattr(self._sdk, "GalbotOneFoxtrotSensor", None)
+        if E is None or not hasattr(self._robot, "get_force_sensor_data"):
+            return None
+        side = "LEFT" if self.joint_name.startswith("left") else "RIGHT"
+        mem = f"{side}_WRIST_FORCE"
+        if mem not in getattr(E, "__members__", {}):
+            return None
+        try:
+            d = self._robot.get_force_sensor_data(getattr(E, mem))
+        except Exception:
+            return None
+        f = getattr(d, "force", None)
+        if f is None:
+            return None
+        try:
+            return [float(x) for x in (list(f) if not hasattr(f, "x")
+                                       else [f.x, f.y, f.z])]
+        except Exception:
+            return None
+
+    # ── 쓰기: 경로 1 — 직접 명령 ────────────────────────────────────────────
     def send_position(self, pos_rad: float) -> None:
         if self.dry_run:
-            # tau=15ms 1차 응답
             now = time.perf_counter()
             dt = now - self._sim_t0
             self._sim_t0 = now
-            alpha = 1.0 - math.exp(-dt / 0.015)
+            alpha = 1.0 - math.exp(-dt / self._sim_tau)
             self._sim_pos += alpha * (pos_rad - self._sim_pos)
             return
 
-        self._robot.set_joint_commands(                      # ⚠️ 확인 필요
-            {self.joint_name: {"position": pos_rad}}
-        )
+        if "send" in self.resolved:
+            self._send_impl(pos_rad)
+            return
+
+        # 첫 호출에서만 패턴 사다리를 탄다. 이후엔 확정된 것만 쓴다.
+        full = list(self._read_all_positions())
+        full[self._joint_idx] = pos_rad
+        pats = [
+            ("set_joint_positions(names, positions)",
+             (self._joint_names, full), {}),
+            ("set_joint_positions([name], [pos])",
+             ([self.joint_name], [pos_rad]), {}),
+            ("set_joint_positions(positions)", (full,), {}),
+            ("set_joint_positions({name: pos})", ({self.joint_name: pos_rad},), {}),
+        ]
+        _, pat = _try_patterns("set_joint_positions",
+                               self._robot.set_joint_positions, pats)
+        self.resolved["send"] = pat
+        print(f"[adapter] 명령 경로 확정 — {pat}")
+
+    def _read_all_positions(self) -> list[float]:
+        try:
+            pos, _ = _try_patterns("get_joint_positions",
+                                   self._robot.get_joint_positions,
+                                   [("get_joint_positions()", (), {})])
+            return [float(x) for x in pos]
+        except Exception:
+            return [0.0] * len(self._joint_names)
+
+    def _send_impl(self, pos_rad: float) -> None:
+        """확정된 패턴으로만 보낸다 — 측정 루프에서 예외 처리 비용을 없애기 위해."""
+        pat = self.resolved["send"]
+        if pat.startswith("set_joint_positions(names, positions)"):
+            full = self._cached_full
+            full[self._joint_idx] = pos_rad
+            self._robot.set_joint_positions(self._joint_names, full)
+        elif pat.startswith("set_joint_positions([name]"):
+            self._robot.set_joint_positions([self.joint_name], [pos_rad])
+        elif pat.startswith("set_joint_positions(positions)"):
+            full = self._cached_full
+            full[self._joint_idx] = pos_rad
+            self._robot.set_joint_positions(full)
+        else:
+            self._robot.set_joint_positions({self.joint_name: pos_rad})
+
+    _cached_full: list[float] = []
+
+    def prime(self) -> None:
+        """측정 시작 전 1회 — 패턴 확정과 캐시 워밍을 측정 밖에서 끝낸다."""
+        if self.dry_run:
+            return
+        self._cached_full = self._read_all_positions()
+        self.send_position(self._cached_full[self._joint_idx])
+
+    # ── 쓰기: 경로 2 — 궤적 덮어쓰기 ────────────────────────────────────────
+    def send_trajectory(self, times_s: list[float], positions_rad: list[float],
+                        override: bool = True) -> bool:
+        """execute_joint_trajectory + TARGET_TYPE_OVERRIDE.
+
+        chunk 스트리밍의 실제 경로 후보다. 성공 여부를 bool 로 돌려주며,
+        시그니처가 안 맞으면 False (측정을 중단시키지 않는다).
+        """
+        if self.dry_run:
+            # 시뮬: 전송 지연 SIM_TRANSPORT 후 마지막 목표로 재조준.
+            # PART C 가 이 지연을 되찾아내야 코드가 옳다는 뜻이 된다.
+            self._sim_target = positions_rad[-1]
+            self._sim_traj_at = time.perf_counter() + SIM_TRANSPORT_S
+            return True
+        if self._robot is None or not hasattr(self._robot, "execute_joint_trajectory"):
+            return False
+
+        sdk = self._sdk
+        ttype = getattr(sdk, "TARGET_TYPE_OVERRIDE" if override
+                        else "TARGET_TYPE_APPEND", None)
+        pats: list[tuple[str, tuple, dict]] = [
+            ("execute_joint_trajectory(names, times, positions, TARGET_TYPE_OVERRIDE)",
+             ([self.joint_name], times_s, [[p] for p in positions_rad], ttype), {}),
+            ("execute_joint_trajectory(names, times, positions)",
+             ([self.joint_name], times_s, [[p] for p in positions_rad]), {}),
+        ]
+        try:
+            _, pat = _try_patterns("execute_joint_trajectory",
+                                   self._robot.execute_joint_trajectory, pats)
+            self.resolved["trajectory"] = pat
+            self.traj_supported = True
+            return True
+        except SDKCallFailed as e:
+            if self.traj_supported is None:
+                self.traj_supported = False
+                print("\n[adapter] 궤적 경로(PART C)를 쓸 수 없습니다 — 시그니처 미확인.")
+                print(str(e))
+            return False
+
+    _sim_target: float = 0.0
+    _sim_traj_at: Optional[float] = None
 
     def close(self) -> None:
-        if not self.dry_run and self._robot is not None:
-            try:
-                self._robot.disconnect()                      # ⚠️ 확인 필요
-            except Exception:
-                pass
+        if self.dry_run or self._robot is None:
+            return
+        for m in ("disconnect", "shutdown", "close", "stop"):
+            if hasattr(self._robot, m):
+                try:
+                    getattr(self._robot, m)()
+                    return
+                except Exception:
+                    pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,43 +576,169 @@ def measure_bode(ad: G1Adapter, freqs: list[float], amplitude_rad: float,
     return out
 
 
+@dataclass
+class ReplanResult:
+    """궤적 덮어쓰기 재계획 지연 — chunk 스트리밍에서 실제로 중요한 양."""
+    n_trials: int
+    latency_p50_ms: float
+    latency_p95_ms: float
+    latency_max_ms: float
+    detect_threshold_rad: float
+    poll_hz: float
+    failures: int
+
+
+def measure_replan(ad: G1Adapter, trials: int, amplitude_rad: float,
+                   center_rad: float, hold_s: float = 0.6,
+                   horizon_s: float = 0.4) -> Optional[ReplanResult]:
+    """PART C — `execute_joint_trajectory` + TARGET_TYPE_OVERRIDE 재계획 지연.
+
+    왜 PART A 와 별개인가
+    ─────────────────────
+    PART A 는 "Python 이 얼마나 빨리 때릴 수 있나"를 잰다. 그런데 SDK 에는
+    궤적 큐를 통째로 덮어쓰는 경로가 따로 있다. 그 경로에서는 상위가 5Hz 로만
+    보내도 **온보드가 보간**하므로, 상위 rate 천장이 낮다는 사실 자체는
+    분리 전제를 죽이지 않는다.
+
+    대신 그 경로에서 진짜 병목은 **덮어쓰기가 실제 운동에 반영되기까지의 지연**이다.
+    이게 크면 접촉 반응이 늦고, 그건 rate 를 아무리 올려도 해결되지 않는다.
+    action chunk 를 5Hz 로 갈아끼우는 설계에서 이 값이 200ms 를 넘으면
+    "청크 경계마다 이미 지난 상황에 반응"하게 된다.
+
+    측정: 중심에서 정지 → 계단 궤적을 OVERRIDE 로 투입 → 위치가 임계를 넘는
+    첫 순간까지의 시간. 폴링으로 검출하므로 폴링 주기가 분해능 하한이다.
+    """
+    if not ad.send_trajectory([horizon_s], [center_rad]):
+        return None
+
+    thresh = 0.10 * abs(amplitude_rad)
+    lat: list[float] = []
+    fails = 0
+    poll_dt = 0.001
+    # 검출 구간만 따로 센다. 홀드 구간까지 섞으면 poll_hz 가 실제 분해능이 아니라
+    # busy-spin 속도가 되어 의미를 잃는다.
+    det_polls = 0
+    det_time = 0.0
+
+    for k in range(trials):
+        # 홀드: 중심으로 안정화. sleep 을 넣어 SDK 를 불필요하게 두들기지 않는다.
+        ad.send_trajectory([horizon_s], [center_rad])
+        t_end = time.perf_counter() + hold_s
+        while time.perf_counter() < t_end:
+            ad.read_state()
+            time.sleep(poll_dt)
+        _, base, _ = ad.read_state()
+
+        # 계단을 OVERRIDE 로 투입
+        target = center_rad + (amplitude_rad if k % 2 == 0 else -amplitude_rad)
+        t0 = time.perf_counter()
+        if not ad.send_trajectory([horizon_s], [target]):
+            fails += 1
+            continue
+
+        hit = None
+        deadline = t0 + 2.0
+        while time.perf_counter() < deadline:
+            _, p, _ = ad.read_state()
+            det_polls += 1
+            if abs(p - base) >= thresh:
+                hit = time.perf_counter()
+                break
+            time.sleep(poll_dt)
+        det_time += time.perf_counter() - t0
+        if hit is None:
+            fails += 1
+            continue
+        lat.append((hit - t0) * 1e3)
+        print(f"  trial {k+1:2d}/{trials}  {lat[-1]:7.2f} ms")
+
+    if not lat:
+        return ReplanResult(trials, float("nan"), float("nan"), float("nan"),
+                            thresh, 0.0, fails)
+
+    s = sorted(lat)
+    return ReplanResult(
+        n_trials=len(lat),
+        latency_p50_ms=pct(s, 0.50),
+        latency_p95_ms=pct(s, 0.95),
+        latency_max_ms=s[-1],
+        detect_threshold_rad=thresh,
+        poll_hz=det_polls / det_time if det_time > 0 else float("nan"),
+        failures=fails,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 판정
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def verdict(rates: list[RateResult], bode: list[BodePoint]) -> dict:
-    """GATE-1 판정."""
-    # 달성률이 목표의 90% 이상이고 jitter가 2배 미만인 최고 rate
+def verdict(rates: list[RateResult], bode: list[BodePoint],
+            replan: Optional[ReplanResult] = None) -> dict:
+    """GATE-1 판정.
+
+    2026-07-31 개정 — SDK 표면 확인 후 **경로가 둘**임이 드러나 판정을 분리했다.
+
+      경로 A (direct)     : set_joint_commands 를 상위에서 고속 반복
+      경로 B (trajectory) : execute_joint_trajectory + TARGET_TYPE_OVERRIDE
+
+    이전 판정은 경로 A 만 가정하고 "천장 <50Hz → 분리 전제 붕괴"라고 썼다.
+    경로 B 가 실제로 동작한다면 그 논리는 성립하지 않는다 — 상위가 느려도
+    온보드가 보간하기 때문이다. 그래서 **경로 B 가 살아 있으면 replan latency 가
+    주 판정 기준**이 되고, 경로 A 천장은 보조 지표로 내려간다.
+    """
     ok = [r for r in rates
           if r.achieved_hz >= 0.9 * r.target_hz
           and (math.isnan(r.jitter_ratio) or r.jitter_ratio < 2.0)]
     ceiling = max((r.target_hz for r in ok), default=0.0)
 
-    # -3dB 대역폭
     bw = None
     for p in bode:
         if not math.isnan(p.gain_db) and p.gain_db <= -3.0:
             bw = p.freq_hz
             break
 
-    if ceiling >= 100:
-        v = "PASS — admittance 작동 가능. 분리 유지 가능"
+    # ── 경로 B 가 살아 있으면 그쪽이 주 기준 ────────────────────────────────
+    traj_alive = replan is not None and not math.isnan(replan.latency_p50_ms)
+    if traj_alive:
+        p95 = replan.latency_p95_ms
+        if p95 <= 50:
+            v = "PASS (경로 B) — 궤적 덮어쓰기 재계획이 빠름"
+            impl = ("5Hz chunk 스트리밍이 성립. 상위 rate 천장이 낮아도 무방하다. "
+                    "온보드 보간이 받쳐주므로 분리 유지 가능.")
+        elif p95 <= 200:
+            v = "MARGINAL (경로 B) — 재계획 지연 경계"
+            impl = (f"재계획 p95 {p95:.0f}ms. 청크 주기를 이보다 길게 잡아야 하며, "
+                    "그만큼 접촉 반응이 늦는다. 빠른 충돌 반응은 포기하고 "
+                    "느린 삽입/닦기로 작업 범위를 한정할 것.")
+        else:
+            v = "FAIL (경로 B) — 재계획이 너무 느림"
+            impl = (f"재계획 p95 {p95:.0f}ms 는 청크 경계마다 이미 지난 상황에 "
+                    "반응한다는 뜻이다. 경로 A 천장을 함께 보고 판단할 것.")
+    elif ceiling >= 100:
+        v = "PASS (경로 A) — admittance 작동 가능. 분리 유지 가능"
         impl = ("빠른 Model 2가 의미를 가짐. 인터페이스 수정(그리퍼·dt·psi·상대 포즈) 후 "
                 "residual 구조로 진행.")
     elif ceiling >= 50:
-        v = "MARGINAL — 경계"
+        v = "MARGINAL (경로 A) — 경계"
         impl = ("admittance 대역폭이 5-8Hz 수준. 느린 삽입/닦기는 되고 충격 흡수는 안 됨. "
                 "접촉 작업 범위를 서면으로 한정할 것.")
     else:
-        v = "FAIL — 대뇌/소뇌 분리 전제 붕괴"
-        impl = ("빠른 Model 2가 Model 1보다 의미 있게 빠를 여지가 없음. "
+        v = "FAIL — 두 경로 모두 부족"
+        impl = ("경로 A 천장이 낮고 경로 B(궤적 덮어쓰기)도 확보되지 않았다. "
                 "단일 모델 + 벤더 WBC + closed-form S-R-S IK로 전환. "
-                "메인 문서 REV.2 최종 권고 참조.")
+                "메인 문서 REV.2 최종 권고 참조. "
+                "단, 경로 B 실패가 '미지원'이 아니라 '시그니처 미확인' 때문이면 "
+                "probe_sdk.py 로 확정한 뒤 재측정할 것 — 판정이 뒤집힐 수 있다.")
 
     return {
         "command_ceiling_hz": ceiling,
         "tracking_bandwidth_3db_hz": bw,
+        "replan_latency_p50_ms": replan.latency_p50_ms if replan else None,
+        "replan_latency_p95_ms": replan.latency_p95_ms if replan else None,
+        "trajectory_path_available": bool(traj_alive),
+        "primary_criterion": "경로 B (replan latency)" if traj_alive
+                             else "경로 A (command ceiling)",
         "verdict": v,
         "implication": impl,
     }
@@ -332,6 +760,9 @@ def main() -> int:
     ap.add_argument("--rates", default="10,20,30,50,75,100,150,200,300,500")
     ap.add_argument("--bode-freqs", default="0.5,1,2,3,5,7,10")
     ap.add_argument("--skip-bode", action="store_true")
+    ap.add_argument("--skip-replan", action="store_true",
+                    help="PART C(궤적 덮어쓰기 재계획 지연) 건너뜀")
+    ap.add_argument("--replan-trials", type=int, default=12)
     ap.add_argument("--out", default="gate1_results.json")
     args = ap.parse_args()
 
@@ -359,14 +790,21 @@ def main() -> int:
     print()
 
     ad = G1Adapter(dry_run=args.dry_run, joint_name=args.joint)
+    ad.prime()
     results = {
         "meta": {
             "host": args.host,
-            "joint": args.joint,
+            "joint": ad.joint_name,
             "amp_deg": args.amp_deg,
             "dwell_s": args.dwell,
             "dry_run": args.dry_run,
             "unix_time": time.time(),
+            # 어떤 호출 패턴이 실제로 통했는지 — 재현과 어댑터 확정에 필요
+            "resolved_calls": dict(ad.resolved),
+            # ⚠️ 이 값이 host_monotonic 이면 state_dt_*/unique_state_frac 은
+            #    로봇이 아니라 우리 루프를 재는 값이다
+            "state_timestamp_source": ad.ts_source,
+            "sdk_joint_count": len(ad._joint_names) or None,
         }
     }
 
@@ -393,15 +831,53 @@ def main() -> int:
             bode_results = measure_bode(ad, bfreqs, amp, center)
             results["bode"] = [asdict(p) for p in bode_results]
 
-        v = verdict(rate_results, bode_results)
+        replan: Optional[ReplanResult] = None
+        if not args.skip_replan:
+            print("\n── PART C — 궤적 덮어쓰기 재계획 지연 " + "─" * 26)
+            print("   execute_joint_trajectory + TARGET_TYPE_OVERRIDE")
+            replan = measure_replan(ad, args.replan_trials, amp, center)
+            if replan is None:
+                print("   건너뜀 — 궤적 경로를 쓸 수 없습니다.")
+                print("   (미지원인지 시그니처 미확인인지는 위 진단을 보십시오.")
+                print("    후자면 probe_sdk.py 로 확정 후 재측정하면 판정이 바뀔 수 있습니다.)")
+            else:
+                results["replan"] = asdict(replan)
+                results["meta"]["trajectory_call"] = ad.resolved.get("trajectory")
+                print(f"   p50 {replan.latency_p50_ms:.2f} ms · "
+                      f"p95 {replan.latency_p95_ms:.2f} ms · "
+                      f"max {replan.latency_max_ms:.2f} ms  "
+                      f"(폴링 {replan.poll_hz:.0f} Hz, 실패 {replan.failures})")
+                if args.dry_run:
+                    err = abs(replan.latency_p50_ms - SIM_TRANSPORT_S * 1e3)
+                    ok = err < 15.0
+                    print(f"   [드라이런 자체검증] 주입한 전송 지연 "
+                          f"{SIM_TRANSPORT_S*1e3:.0f} ms 를 "
+                          f"{replan.latency_p50_ms:.1f} ms 로 복원 "
+                          f"→ {'✅ 통과' if ok else '❌ 실패'}")
+
+        # 손목 F/T 가 실제로 값을 주는지 여기서 한 번 확인해둔다 (회사 방문 1회 절약)
+        w = ad.read_wrench()
+        if w is not None:
+            results["wrench_sample"] = w
+            print(f"\n  손목 F/T 표본: {[round(x, 3) for x in w]}")
+
+        v = verdict(rate_results, bode_results, replan)
         results["verdict"] = v
 
         print("\n" + "=" * 72)
         print("판정")
         print("=" * 72)
-        print(f"  명령 rate 천장     : {v['command_ceiling_hz']:.0f} Hz")
+        print(f"  주 기준            : {v['primary_criterion']}")
+        print(f"  명령 rate 천장     : {v['command_ceiling_hz']:.0f} Hz   (경로 A)")
         bw = v["tracking_bandwidth_3db_hz"]
         print(f"  추종 대역폭(-3dB)  : {bw if bw else '측정 범위 내 없음'} Hz")
+        if v["replan_latency_p95_ms"] is not None:
+            print(f"  재계획 지연 p95    : {v['replan_latency_p95_ms']:.1f} ms  (경로 B)")
+        else:
+            print(f"  재계획 지연        : 측정 못 함 (경로 B 미확보)")
+        if ad.ts_source == "host_monotonic":
+            print(f"\n  ⚠️ 상태 타임스탬프가 호스트 시계입니다 — state_dt_*/unique_state_frac")
+            print(f"     은 로봇 응답이 아니라 우리 루프를 잰 값입니다.")
         print(f"\n  → {v['verdict']}")
         print(f"     {v['implication']}")
 

@@ -34,8 +34,12 @@ MACHINE    := $(shell hostname -s 2>/dev/null || echo unknown)
 DATA       ?= data/robocoin
 OUT        ?= gate1_results_$(HOST)_$(MACHINE).json
 
+# GalbotSDK 는 setup.sh 를 source 해야 import 된다 (LD_LIBRARY_PATH/PYTHONPATH).
+# 경로가 다르면:  make SDK_SETUP=/실제/경로/setup.sh probe
+SDK_SETUP  ?= /opt/galbot/galbot_sdk/linux-x86_64-gcc940/setup.sh
+
 .DEFAULT_GOAL := help
-.PHONY: help setup check test gate1 gate1-real analysis inspect e0-check e0-smoke bench lock clean
+.PHONY: help setup check test gate1 gate1-real probe probe-check probe-live analysis inspect e0-check e0-smoke bench lock clean
 
 # ─────────────────────────────────────────────────────────────────────────────
 help:  ## [모든 기계]
@@ -53,6 +57,12 @@ help:  ## [모든 기계]
 	@echo "    make gate1        [모든 기계]  GATE-1 dry-run (SDK 없이 스크립트만 검증)"
 	@echo "    make e0-check     [1660/3090]  E0 를 이 기계에서 돌릴 수 있는지 점검"
 	@echo "    make e0-smoke     [모든 기계]  E0 배선 검증 (합성 데이터, GPU 불필요)"
+	@echo ""
+	@echo "    make probe-check  [모든 기계]  probe_sdk 파서/안전차단 자체검증"
+	@echo ""
+	@echo "  SDK"
+	@echo "    make probe        [회사 Linux]  GalbotSDK 시그니처 추출 (로봇 불필요)"
+	@echo "    make probe-live   [회사 Linux + 로봇]  읽기 전용 실물 조회 (안 움직임)"
 	@echo ""
 	@echo "  실측"
 	@echo "    make gate1-real   [회사 Linux + 로봇]  ⚠️ 실기체가 움직인다"
@@ -88,6 +98,27 @@ gate1:  ## [모든 기계]
 	$(PY) tools/measure_loop_rate.py --dry-run --host unspecified \
 		--dwell 1.0 --rates 10,50,100 --skip-bode --out /dev/null
 
+# ── GalbotSDK 표면 조사 ──────────────────────────────────────────────────────
+# galbot_sdk 는 pybind11 확장이라 inspect.signature() 가 전부 실패한다.
+# 실제 인자는 docstring 에만 있으므로 이 도구로 긁어야 어댑터를 확정할 수 있다.
+# probe      = 정적 조사만. 로봇에 연결하지 않고 아무것도 움직이지 않는다.
+# probe-live = 읽기 전용 실물 조회. set_/move_/execute_ 는 코드에서 하드 차단됨.
+#              손목 F/T 실값, 관절 이름 순서, 카메라 extrinsic 을 여기서 한 번에 얻는다.
+probe-check:  ## [모든 기계] SDK 없이 파서/안전차단 검증
+	$(PY) tools/probe_sdk.py --self-test
+
+probe:  ## [회사 Linux] 로봇 불필요
+	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; \
+		echo "  make SDK_SETUP=/실제/경로/setup.sh probe"; \
+		echo "  찾기:  find /opt -maxdepth 6 -type d -name galbot_sdk"; exit 1; }
+	. $(SDK_SETUP) && $(PY) tools/probe_sdk.py --focus \
+		--out sdk_surface_$(MACHINE).json --md sdk_surface_$(MACHINE).md
+
+probe-live:  ## [회사 Linux + 로봇] 읽기 전용. 움직이지 않는다
+	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; exit 1; }
+	. $(SDK_SETUP) && $(PY) tools/probe_sdk.py --live --focus \
+		--out sdk_live_$(MACHINE).json --md sdk_live_$(MACHINE).md
+
 # ⚠️ 실기체가 실제로 움직인다. left_arm_joint4 를 ±2° 로만 흔들지만
 #    팔 주변을 비우고 e-stop 을 손 닿는 곳에 둘 것. 측정 중 이 머신에서
 #    다른 워크로드를 돌리면 jitter 가 오염된다 (3090 은 공유 자원이라 특히 주의).
@@ -96,9 +127,11 @@ gate1:  ## [모든 기계]
 gate1-real:  ## [회사 Linux + 로봇 LAN]
 	@test "$(HOST)" != "unspecified" || { \
 		echo "HOST 를 지정할 것: make gate1-real HOST=external  (또는 HOST=onboard)"; exit 1; }
+	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; \
+		echo "  source 하지 않으면 import galbot_sdk 가 실패합니다."; exit 1; }
 	@echo "⚠️  실기체 동작 ($(HOST)). 팔 주변 정리 / e-stop 확인 후 Enter, 중단은 Ctrl-C"
 	@read _
-	$(PY) tools/measure_loop_rate.py --host $(HOST) --out $(OUT)
+	. $(SDK_SETUP) && $(PY) tools/measure_loop_rate.py --host $(HOST) --out $(OUT)
 
 # ── 데이터 분석 ───────────────────────────────────────────────────────────────
 # RoboCOIN(공개 G1 실기체 데이터) 3종: 목 기여도 / psi 분포 / 시야 내 가시성.
