@@ -43,6 +43,14 @@ parquet 에는 센서 원값을 쓴다. 보정은 나중에 다시 할 수 있�
   observation.psi.left / right         ()    arm angle [rad] — FK 로 계산, 라벨링 0
   observation.T_rel                    (9,)  손간 상대 변환 dp(3)+6D회전(6)
 
+⚠️ 확인 필요 — psi 와 T_rel 은 **URDF 로 유도한 우리 FK** 로만 계산된다
+   (robot/assets/g1_joints_raw.json → G1Arm.fk / arm_angle). URDF 가 실기체와
+   다르면 그 오차가 데이터셋에 **영구히 구워지고, F/T 와 똑같이 소급 수정이
+   불가능하다.** 현재 우리 FK 는 자기일관성만 검증됐고 SDK FK 와 대조한 적이
+   없다 (test_kinematics.py T1~T7 전부 URDF 자기일관성).
+   → 대량 변환 전에 `make probe-live` 로 SDK FK 와 1회 대조할 것.
+     tip 프레임 판별은 g1_kinematics.identify_tip_frame() 이 해준다.
+
 psi 와 T_rel 을 여기서 굽는 이유: 둘 다 기록된 관절각에서 **FK 한 번**으로
 공짜로 나오고 (샘플당 수십 us), 학습 루프에서 매번 계산하면 그 비용이
 epoch 수만큼 곱해진다. 특히 T_rel 은 **두 절대 포즈의 뺄셈이 아니라 FK 로
@@ -989,6 +997,10 @@ def align(t_anchor: np.ndarray, src: Optional[Stream], mode: str = "nearest"
 class Derived:
     """
     기록된 관절각에서 FK 로 psi 와 T_rel 을 굽는다. 사람 라벨링 0.
+
+    ⚠️ 확인 필요 — 여기서 쓰는 FK 는 **URDF 자기일관성만 검증**됐다. SDK FK 와
+    대조한 적이 없고, URDF 가 실기체와 다르면 그 오차가 데이터셋에 영구히
+    구워진다 (F/T 와 동일하게 소급 수정 불가). 대량 변환 전 1회 대조할 것.
 
     왜 학습 루프가 아니라 변환 시점인가
     ──────────────────────────────────

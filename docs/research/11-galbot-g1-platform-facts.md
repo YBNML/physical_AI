@@ -121,7 +121,7 @@
 
 ### IMPLICATIONS (핵심 압축)
 
-- **Model 2는 생존하나 '소뇌'로서는 아님.** position-only가 결정적 — 토크·stiffness·damping 변조 불가. 컴플라이언스/임피던스라는 생물학적 은유가 함의하는 모든 것이 이 인터페이스에서 불가. Model 2를 정직하게 재규정: 학습된 redundancy-resolver + 궤적 셰이퍼이지 force 컨트롤러가 아님.
+- **Model 2는 생존하나 '소뇌'로서는 아님.** position-only는 **벤더 문서 근거이나 미검증**이다. 원문은 `"only JointCommand::position is effective **in current versions**"` 이고, 같은 문서가 그 `in current versions` 가 변경 가능성을 시사한다고 따로 짚는다. *(2026-07-31 정정: 이전 판은 인용에서 이 hedge 를 지우고 "결정적"이라고 썼다 — 항구성을 과장한 것이다.)* 이 인터페이스를 통해서는 토크·stiffness·damping 변조 불가. 다만 실물 SDK 표면에 `TARGET_DATA_JOINT_EFFORT` / `TARGET_DATA_FRAME_WRENCH` 상수가 **존재함이 2026-07-31 하드웨어에서 확인**됐다. 단 G1 팔에서의 지원 여부는 미확인이다 — 에러 코드에 `UNSUPPORTED_FUNCRION` 이 있으므로 **선언 ≠ 지원**. 현재로서는 Model 2를 정직하게 재규정: 학습된 redundancy-resolver + 궤적 셰이퍼이지 force 컨트롤러가 아님.
 - **"IK가 못 하는 것"의 답은 좁아졌지만 실재함**: 명령 채널이 IK와 동일하므로 Model 2의 가치는 전적으로 *더 나은 관절 타깃 선택*(null space 활용, 양팔 협조, 장애물 인지 자세, 사람 텔레옵 스타일)에서 나옴. GalbotMotion이 실시간 장애물 인지가 없다는 점이 구체적 공백 — vision 조건부 정책의 방어 가능한 논지. '학습된 컴플라이언스'는 아님.
 - **F/T 의존성 성립(이중 확인).** 단 F/T는 관측으로만 진입해 위치 타깃을 이동시킴 → Model 2는 사실상 admittance 컨트롤러이고, admittance 품질은 루프 rate에 전적으로 종속 — 그 rate가 미문서. **정책 코드 작성 전 제어 rate 실측이 최우선·최저비용 실험.** SDK 자체 예제가 1Hz blocking 데모라는 것이 진짜 경고 신호.
 - **Mac mini 플랜은 서술된 대로면 blocked.** 선택지: (a) 탑재 Orin에서 추론(네트워크 홉 제거, 275 TOPS/64GB가 이 워크로드엔 Mac보다 강함), (b) 로봇 LAN에 소형 Linux 박스를 SDK 호스트로, (c) Mac은 학습 전용. *(참고: REV.2/REV.3에서 (a)+학습용 RTX 3090 Ubuntu 박스 조합으로 확정)*

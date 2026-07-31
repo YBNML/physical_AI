@@ -14,6 +14,13 @@ G1 기구학 검증 — 문서에 인용된 수치를 직접 재현한다.
                        EE 가 얼마나 벗어나는가 (REV.1 §3.5 의 표)
   T5  head→arm_base : 다리/허리/베이스가 정말 소거되는가
   T6  속도           : IK 1회 비용 (학습 모델과의 비교 기준)
+  T7  tip 프레임     : tip 후보 4개의 상수 오프셋과 판별표가 URDF 와 맞는가
+
+⚠️ **T1~T7 은 전부 URDF 자기일관성 검정이다.**
+   URDF 자체가 실기체와 다르면 7/7 통과해도 아무것도 보증하지 않는다.
+   외부 ground truth(SDK FK) 대조는 아직 없다 — pybind11 시그니처가 확정되어야
+   호출문을 쓸 수 있기 때문이다 (`docs/RUNBOOK.md` §2-1 의 `make probe` 선행).
+   T7 은 그 대조를 **가능하게 만드는 사전 작업**이지 대조 자체가 아니다.
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ import numpy as np
 
 from g1_kinematics import (
     G1Arm, G1Head, T_from, se3_inv, pose_error, build_chain, _load_joints,
+    identify_tip_frame, TIP_SIGNATURE_FROM_TCP, TIP_CANDIDATES,
 )
 
 RNG = np.random.default_rng(0)
@@ -248,11 +256,66 @@ def t6_speed(arm: G1Arm) -> bool:
     print(f"  cold seed (임의 시작)  {dt_cold*1e6:8.1f} µs/해  →  {1/dt_cold:8.0f} Hz")
     print(f"  수렴률 {n_ok}/{len(targets)}")
     print(f"  → 학습된 pose→joint 모델의 현실적 25–60 Hz 와 비교하십시오.")
+    print(f"    (SDK inverse_kinematics_by_state 와는 미비교 — sampling+seed 기반이라")
+    print(f"     psi 미지정·비결정론적이다. µs 만 나란히 적으면 오독한다.)")
     print(f"    그리고 IK 는 실패 시 None 을 반환한다 (타입 있는 infeasibility 신호).")
     return dt_warm < 5e-3
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def t7_tip_frames(side: str = "left") -> bool:
+    """tip 후보 4개의 상수 오프셋이 판별표와 맞고, 판별이 유일한가.
+
+    왜 이게 필요한가: 우리 FK 의 tip 은 `*_gripper_tcp_link` 로 **골라 잡은 것**이고,
+    SDK FK 가 어느 프레임을 쓰는지는 미확인이다. 후보 4개가 전부 fixed joint 로
+    연결돼 있어 오차가 **관절각과 무관한 상수**로 나오는데, 상수 오차는 학습이
+    그대로 흡수해 조용히 틀린 채 수렴한다.
+
+    그 상수성이 그대로 진단 도구가 된다 — SDK FK 표본 하나의 잔차만으로
+    프레임이 판별되는지 여기서 확인해둔다.
+    """
+    print("\n── T7 tip 프레임 판별표 " + "─" * 44)
+    ok = True
+
+    # 1) 판별표가 URDF 에서 실제로 유도되는가 (하드코딩 표류 방지)
+    ref = build_chain(f"{side}_gripper_tcp_link", root=f"{side}_arm_link7")
+    T_tcp = ref.fk(np.zeros(len(ref.dof_idx)))
+    print(f"  {'후보':34s} {'|Δt| (mm)':>11} {'Δθ (°)':>9}   판별")
+    for cand in TIP_CANDIDATES:
+        ch = build_chain(f"{side}_{cand}", root=f"{side}_arm_link7")
+        T_c = ch.fk(np.zeros(len(ch.dof_idx)))
+        dp, dr = pose_error(T_tcp, T_c)
+        dmm, ddeg = dp * 1e3, math.degrees(dr)
+        got = identify_tip_frame(dmm, ddeg)
+        good = (got == cand)
+        ok &= good
+        print(f"  {cand:34s} {dmm:11.2f} {ddeg:9.2f}   "
+              f"{str(got):30s} {OK if good else FAIL}")
+
+    # 2) 잡음이 있어도 유일하게 갈리는가
+    noisy = all(identify_tip_frame(d + dd, a + da) == name
+                for (d, a), name in TIP_SIGNATURE_FROM_TCP.items()
+                for dd, da in ((1.5, 3.0), (-1.5, -3.0)))
+    print(f"  잡음 ±1.5mm/±3° 하에서도 유일 판별      {OK if noisy else FAIL}")
+    ok &= noisy
+
+    # 3) 표에 없는 잔차는 반드시 None (= root 프레임 문제 신호)
+    none_ok = all(identify_tip_frame(d, a) is None
+                  for d, a in ((588.0, 12.0), (50.0, 45.0), (143.2, 90.0)))
+    print(f"  표 밖·모호 잔차는 None 반환             {OK if none_ok else FAIL}")
+    ok &= none_ok
+
+    # 4) torso 아래에 남아 있는 자유도 — root 프레임 오판 시 오차 규모
+    leg = build_chain("torso_base_link", root="base_link")
+    n_leg = len(leg.dof_idx)
+    print(f"  base_link → torso_base_link 사이 DOF   {n_leg}"
+          f"  ({', '.join(leg.links[i].name for i in leg.dof_idx)})")
+    print(f"    → SDK FK 가 base 기준이면 이 {n_leg}개만큼 어긋난다."
+          f" 잔차가 표에 없으면 tip 이 아니라 여기를 의심할 것.")
+
+    return ok
 
 
 def main() -> int:
@@ -269,6 +332,7 @@ def main() -> int:
         "T4 L2 평균 붕괴": t4_l2_collapse(arm),
         "T5 head 변환": t5_head_transform(),
         "T6 IK 속도": t6_speed(arm),
+        "T7 tip 프레임": t7_tip_frames(),
     }
 
     print("\n" + "=" * 72)

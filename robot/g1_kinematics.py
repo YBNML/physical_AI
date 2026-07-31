@@ -1,5 +1,5 @@
 """
-Galbot G1 기구학 — FK, S–R–S closed-form IK, arm angle (psi)
+Galbot G1 기구학 — FK, psi-구속 IK, arm angle (psi)
 
 이 모듈이 존재하는 이유
 ───────────────────────
@@ -14,9 +14,21 @@ Galbot G1 기구학 — FK, S–R–S closed-form IK, arm angle (psi)
    → 인터페이스에 arm angle psi 스칼라 1개를 추가하면 완전 결정된다.
 
 따라서 이 모듈은:
-  - 학습된 Model 2가 이겨야 할 **정확한 해석적 baseline** (E0의 C8 arm)
+  - 학습된 Model 2가 이겨야 할 **학습 파라미터 0 인 결정론적 baseline** (E0의 C8 arm)
   - psi 라벨을 텔레옵 기록에서 공짜로 뽑는 도구 (FK 1회, 사람 라벨링 0)
   - L2 회귀가 self-motion manifold 위에서 붕괴하는 크기를 정량화하는 도구
+
+⚠️ 용어 주의 — 여기 구현된 IK 는 **closed-form 이 아니라 psi-구속 DLS** 다.
+   S–R–S 구조에서 (포즈, psi) 로부터 해석해가 **존재한다**는 것은 참인 수학적
+   사실이고 README/GLOSSARY 가 말하는 것도 그것이지만, 이 모듈은 그 해석해를
+   구현하지 않았다 (`docs/PLAN.md` 의 M5 는 아직 미완료 항목이다).
+   실제 구현은 7×7 (6 포즈 + 1 psi) DLS 반복이다 — `ik()` 참조.
+   학습 모델 대비 3자릿수 빠르지만 "해석해"는 아니다.
+
+⚠️ **이 모듈의 모든 값은 URDF 자기일관성만 보장한다.**
+   URDF 자체가 실기체와 다르면 test_kinematics.py 가 6/6 통과해도 아무것도
+   보증하지 않는다. 외부 ground truth 대조(SDK FK)는 아직 안 했다 —
+   `docs/RUNBOOK.md` §2-1 의 probe 절차 참조.
 
 모든 상수는 공식 Apache-2.0 `galbot_one_golf_description` URDF에서 추출했다
 (robot/assets/g1_joints_raw.json). 하드코딩된 값은 없다.
@@ -187,6 +199,84 @@ def build_chain(target_link: str, root: str = "torso_base_link",
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# tip 프레임 판별표
+#
+# 왜 필요한가
+# ───────────
+# 우리 FK 의 tip 은 `*_gripper_tcp_link` 로 **골라 잡은 것**이다. SDK 의
+# `forward_kinematics_by_state` 가 어느 프레임을 돌려주는지는 미확인이고,
+# 팔 끝단 후보가 4개인데 전부 `fixed` joint 로 연결돼 있다 — 즉 **관절각과
+# 무관한 상수 오차**만 낸다. 이게 왜 위험하냐면, 상수 오차는 학습이 그대로
+# 흡수해버려서 조용히 틀린 채로 수렴하기 때문이다.
+#
+# 다행히 상수라는 점이 그대로 진단 도구가 된다. 아래 표는 URDF 에서 계산한
+# 후보 간 상대 오프셋이고, 값이 서로 충분히 떨어져 있어 **SDK FK 표본 하나만
+# 있어도** 어느 프레임인지 유일하게 판별된다.
+#
+#   기준: left_arm_link7 (팔 마지막 회전 관절의 자식)
+#
+#   후보                                누적 |t|      link7 기준 R
+#   ─────────────────────────────────────────────────────────────────────
+#   arm_end_effector_mount_link         109.26 mm    diag(-1, +1, -1)
+#   gripper_flange_link                 109.26 mm    mount 에서 Rx(+90°)
+#   gripper_base_link                   115.76 mm    flange 에서 +6.5mm
+#   gripper_tcp_link  ← 우리 기본값     255.72 mm    diag(-1, -1, +1)
+#
+#   쌍별 오프셋 (tcp 를 기준으로 본 잔차)
+#   ─────────────────────────────────────────────────────────────────────
+#   tcp ↔ mount                         146.46 mm    180°
+#   tcp ↔ flange                        146.46 mm     90°
+#   tcp ↔ gripper_base                  139.96 mm     90°
+#   flange ↔ gripper_base                 6.50 mm      0°
+#
+# 사용법: SDK FK 와 우리 FK(tip=tcp)의 잔차를 재서 `identify_tip_frame()` 에
+# 넣으면 어느 프레임인지 알려준다. 잔차가 표에 없으면 tip 문제가 아니라
+# **기준(root) 프레임 문제**일 가능성이 크다 — 그때는 다리 관절만 흔들어
+# EE 포즈가 변하는지 보면 된다 (변하면 base/world 기준, 안 변하면 torso 기준).
+# ─────────────────────────────────────────────────────────────────────────────
+
+TIP_CANDIDATES = ("arm_end_effector_mount_link", "gripper_flange_link",
+                  "gripper_base_link", "gripper_tcp_link")
+
+# tcp 기준 잔차 (mm, deg) → 실제 SDK tip 프레임 이름
+TIP_SIGNATURE_FROM_TCP = {
+    (0.00, 0.0): "gripper_tcp_link",
+    (146.46, 180.0): "arm_end_effector_mount_link",
+    (146.46, 90.0): "gripper_flange_link",
+    (139.96, 90.0): "gripper_base_link",
+}
+
+
+def identify_tip_frame(pos_err_mm: float, rot_err_deg: float,
+                       tol_mm: float = 3.0, tol_deg: float = 10.0) -> Optional[str]:
+    """SDK FK 와 우리 FK(tip=tcp)의 잔차로 SDK 의 tip 프레임을 판별한다.
+
+    **최근접 매칭 + 모호성 검사.** 임계 이내를 순회하며 첫 항목을 고르면 안 된다 —
+    flange(146.46mm)와 gripper_base(139.96mm)의 간격이 6.5mm 뿐이라, 임계를
+    그보다 크게 잡으면 둘이 섞이고 dict 순서에 따라 답이 갈린다.
+
+    반환:
+      프레임 이름 = 유일하게 판별됨
+      None        = 표에 없거나 두 후보 사이에서 모호함.
+                    tip 문제가 아니라 **root(기준) 프레임 문제**를 의심할 것 —
+                    다리 관절만 흔들어 EE 포즈가 변하는지 보면 갈린다.
+    """
+    def cost(sig: tuple[float, float]) -> float:
+        dmm, ddeg = sig
+        # 위치/회전을 각자의 허용치로 정규화해 합산
+        return (abs(pos_err_mm - dmm) / tol_mm) + (abs(rot_err_deg - ddeg) / tol_deg)
+
+    ranked = sorted(TIP_SIGNATURE_FROM_TCP.items(), key=lambda kv: cost(kv[0]))
+    (best_sig, best_name), (_, runner_name) = ranked[0], ranked[1]
+    if cost(best_sig) > 1.0:
+        return None                                  # 어느 후보와도 안 맞음
+    if cost(ranked[1][0]) - cost(best_sig) < 0.5:
+        return None                                  # 1·2위가 붙어 있어 모호
+    del runner_name
+    return best_name
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # G1 팔
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -331,7 +421,10 @@ class G1Arm:
 
         해석해 대비 장점: URDF 축 관례에 자동으로 맞고 관절 한계를 그대로 쓴다.
         단점: 반복법이라 마이크로초가 아니라 수십 마이크로초.
-        측정된 실제 비용은 tests 참조 — 여전히 학습 모델보다 3자릿수 빠르다.
+        측정된 실제 비용은 tests(T6) 참조 — 학습 모델 대비 3자릿수 빠르다.
+        ⚠️ SDK `inverse_kinematics_by_state` 와는 **미비교**다. SDK IK 는
+        sampling + seed 기반이라 psi 를 지정받지 않고 redundancy 해가
+        비결정론적이므로, µs 만 나란히 적으면 오독을 부른다.
 
         실패 시 None 을 반환한다 (**타입 있는 infeasibility 신호** — 회귀
         네트워크가 구조적으로 만들 수 없는 것).

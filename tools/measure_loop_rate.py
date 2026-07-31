@@ -142,6 +142,8 @@ class G1Adapter:
         self.resolved: dict[str, str] = {}
         # 상태 타임스탬프가 로봇 것인지 호스트 것인지. 이게 결과 해석을 바꾼다.
         self.ts_source = "sim" if dry_run else "unknown"
+        self._ts_attr: Optional[str] = None
+        self._read_via = "positions"        # "positions" | "states"
         self.traj_supported: Optional[bool] = None
 
         if dry_run:
@@ -231,20 +233,59 @@ class G1Adapter:
             )
             probe = st[0] if isinstance(st, (list, tuple)) and st else st
             for attr in ("timestamp_ns", "timestamp", "stamp", "header"):
-                if hasattr(probe, attr):
+                if hasattr(probe, attr) and self._to_ns(getattr(probe, attr)) is not None:
+                    self._ts_attr = attr
                     self.ts_source = f"device.{attr}"
-                    print(f"[adapter] 상태 타임스탬프: 로봇 제공 ({attr})")
+                    # 타임스탬프를 실제로 쓰려면 read 경로도 get_joint_states 여야 한다.
+                    # get_joint_positions 는 float 만 주므로 타임스탬프가 없다.
+                    self._read_via = "states"
+                    print(f"[adapter] 상태 타임스탬프: 로봇 제공 ({attr}) — read 경로를 "
+                          f"get_joint_states 로 고정")
                     return
         except Exception as e:
             print(f"[adapter] get_joint_states 탐색 실패: {type(e).__name__}: {e}")
         self.ts_source = "host_monotonic"
+        self._read_via = "positions"
         print("[adapter] ⚠️ 로봇 타임스탬프 없음 → 호스트 시계 사용.")
         print("          state_dt_* / unique_state_frac 은 '로봇 응답'이 아니라")
-        print("          '우리 루프'를 재는 값이 됩니다. 판정 시 감안하십시오.")
+        print("          '우리 루프'를 재는 값이 됩니다. 판정에서 천장은")
+        print("          '미확인(unconfirmed)'으로 강등됩니다.")
+
+    @staticmethod
+    def _to_ns(v: object) -> Optional[int]:
+        """SDK 가 어떤 형태로 주든 ns 정수로. 못 바꾸면 None."""
+        # ROS 스타일 Header/stamp: sec + nanosec
+        for sec_a, nsec_a in (("sec", "nanosec"), ("secs", "nsecs"),
+                              ("sec", "nsec")):
+            if hasattr(v, sec_a) and hasattr(v, nsec_a):
+                try:
+                    return int(getattr(v, sec_a)) * 1_000_000_000 + int(getattr(v, nsec_a))
+                except Exception:
+                    return None
+        if hasattr(v, "stamp"):
+            return G1Adapter._to_ns(v.stamp)
+        if isinstance(v, (int, float)):
+            x = float(v)
+            if x <= 0:
+                return None
+            # 단위 추정: 1e18~ = ns, 1e15~ = us, 1e12~ = ms, 그 외 = s
+            if x > 1e17:
+                return int(x)
+            if x > 1e14:
+                return int(x * 1e3)
+            if x > 1e11:
+                return int(x * 1e6)
+            return int(x * 1e9)
+        return None
 
     # ── 읽기 ────────────────────────────────────────────────────────────────
     def read_state(self) -> tuple[int, float, Optional[float]]:
-        """(timestamp_ns, position_rad, effort_Nm|None)."""
+        """(timestamp_ns, position_rad, effort_Nm|None).
+
+        타임스탬프는 로봇이 주면 로봇 것을, 아니면 호스트 시계를 쓴다.
+        어느 쪽인지는 `self.ts_source` 에 남고 결과 JSON 에 기록된다 — 이 구분이
+        `unique_state_frac` / `state_dt_*` 의 의미를 통째로 바꾸기 때문이다.
+        """
         if self.dry_run:
             # 궤적 경로가 활성이면 여기서도 플랜트를 전진시킨다.
             # (PART C 는 send 없이 read 만 반복하므로 이게 없으면 응답이 없다)
@@ -257,6 +298,14 @@ class G1Adapter:
                         alpha = 1.0 - math.exp(-dt / self._sim_tau)
                         self._sim_pos += alpha * (self._sim_target - self._sim_pos)
             return (time.monotonic_ns(), self._sim_pos, 0.0)
+
+        if self._read_via == "states":
+            st = self._robot.get_joint_states()
+            item = st[self._joint_idx] if isinstance(st, (list, tuple)) else st
+            p = float(getattr(item, "position", item))
+            ts = self._to_ns(getattr(item, self._ts_attr, None)) if self._ts_attr else None
+            return (ts if ts is not None else time.monotonic_ns(), p,
+                    getattr(item, "effort", None))
 
         try:
             pos, pat = _try_patterns(
@@ -274,8 +323,7 @@ class G1Adapter:
             item = st[self._joint_idx] if isinstance(st, (list, tuple)) else st
             p = float(getattr(item, "position", item))
 
-        ts = time.monotonic_ns()
-        return (ts, p, None)
+        return (time.monotonic_ns(), p, None)
 
     def read_wrench(self) -> Optional[list[float]]:
         """손목 F/T. GATE-1 본체는 아니지만 여기서 한 번에 확인해둔다."""
@@ -436,6 +484,11 @@ class RateResult:
     target_hz: float
     achieved_hz: float
     n_commands: int
+    # 이 램프가 read 를 포함했는가. False 면 achieved_hz 는 순수 송신 천장이다.
+    with_read: bool
+    # 관측 가능한 상태 갱신률 = unique_state_frac × achieved_hz.
+    # 로봇 타임스탬프가 있을 때만 의미가 있다.
+    state_hz: float
     # 명령 송신 주기 (우리가 얼마나 규칙적으로 보냈는가)
     send_p50_ms: float
     send_p99_ms: float
@@ -450,8 +503,15 @@ class RateResult:
 
 
 def measure_rate(ad: G1Adapter, target_hz: float, duration_s: float,
-                 amplitude_rad: float, center_rad: float) -> RateResult:
-    """PART A — 목표 rate로 작은 사인을 스트리밍하며 실제 달성치와 jitter를 측정."""
+                 amplitude_rad: float, center_rad: float,
+                 do_read: bool = True) -> RateResult:
+    """PART A — 목표 rate로 작은 사인을 스트리밍하며 실제 달성치와 jitter를 측정.
+
+    `do_read=False` 면 송신만 한다. 왜 나눠 재는가:
+    한 iteration 에서 send 와 read 를 둘 다 하면 achieved_hz 가 **두 호출의 합산
+    주기**를 반영한다. 그러면 천장이 낮게 나왔을 때 그게 명령 경로 탓인지 상태
+    조회 탓인지 구분할 수 없다. 두 번 돌려 병기하면 그 오귀속이 사라진다.
+    """
     period = 1.0 / target_hz
     send_gaps: list[float] = []
     state_ts: list[int] = []
@@ -477,11 +537,12 @@ def measure_rate(ad: G1Adapter, target_hz: float, duration_s: float,
             send_gaps.append((now - last_send) * 1e3)
         last_send = now
 
-        ts, _pos, _eff = ad.read_state()
-        state_ts.append(ts)
-        if last_ts is not None and ts != last_ts:
-            state_gaps.append((ts - last_ts) / 1e6)
-        last_ts = ts
+        if do_read:
+            ts, _pos, _eff = ad.read_state()
+            state_ts.append(ts)
+            if last_ts is not None and ts != last_ts:
+                state_gaps.append((ts - last_ts) / 1e6)
+            last_ts = ts
 
         next_t += period
         # 뒤처지면 따라잡기를 포기 (스케줄 붕괴 방지)
@@ -491,15 +552,18 @@ def measure_rate(ad: G1Adapter, target_hz: float, duration_s: float,
     elapsed = time.perf_counter() - t_start
     sg = sorted(send_gaps)
     stg = sorted(state_gaps)
-    uniq = len(set(state_ts)) / max(1, len(state_ts))
+    uniq = (len(set(state_ts)) / len(state_ts)) if state_ts else float("nan")
 
     p50 = pct(sg, 0.50) if sg else float("nan")
     p99 = pct(sg, 0.99) if sg else float("nan")
+    achieved = n / elapsed
 
     return RateResult(
         target_hz=target_hz,
-        achieved_hz=n / elapsed,
+        achieved_hz=achieved,
         n_commands=n,
+        with_read=do_read,
+        state_hz=(uniq * achieved) if state_ts else float("nan"),
         send_p50_ms=p50,
         send_p99_ms=p99,
         send_p999_ms=pct(sg, 0.999) if sg else float("nan"),
@@ -674,23 +738,49 @@ def measure_replan(ad: G1Adapter, trials: int, amplitude_rad: float,
 
 
 def verdict(rates: list[RateResult], bode: list[BodePoint],
-            replan: Optional[ReplanResult] = None) -> dict:
+            replan: Optional[ReplanResult] = None,
+            ts_source: str = "unknown") -> dict:
     """GATE-1 판정.
 
     2026-07-31 개정 — SDK 표면 확인 후 **경로가 둘**임이 드러나 판정을 분리했다.
 
-      경로 A (direct)     : set_joint_commands 를 상위에서 고속 반복
+      경로 A (direct)     : 관절 위치 명령을 상위에서 고속 반복
+                            (현재 구현은 set_joint_positions 사다리를 탄다.
+                             set_joint_commands / _batch 는 아직 미측정이다)
       경로 B (trajectory) : execute_joint_trajectory + TARGET_TYPE_OVERRIDE
 
     이전 판정은 경로 A 만 가정하고 "천장 <50Hz → 분리 전제 붕괴"라고 썼다.
     경로 B 가 실제로 동작한다면 그 논리는 성립하지 않는다 — 상위가 느려도
     온보드가 보간하기 때문이다. 그래서 **경로 B 가 살아 있으면 replan latency 가
     주 판정 기준**이 되고, 경로 A 천장은 보조 지표로 내려간다.
+
+    ⚠️ 천장의 신뢰성
+    ───────────────
+    `achieved_hz` 는 **우리가 함수를 호출한 횟수**를 센 값이다. 송신 API 가
+    fire-and-forget 비동기 publish 라면 로봇이 실제로 실행했는지와 무관하게
+    올라가고, 그러면 천장이 부풀려져 **거짓 PASS** 가 난다.
+
+    이걸 반증할 유일한 증거는 **로봇이 제공한 타임스탬프로 본 상태 갱신률**이다.
+    로봇 타임스탬프가 없으면(호스트 시계 대체) 그 증거가 원리적으로 없으므로
+    천장을 PASS 로 승인하지 않고 `unconfirmed` 로 강등한다.
     """
-    ok = [r for r in rates
+    device_ts = ts_source.startswith("device")
+
+    # 경로 A 천장은 send-only 램프가 있으면 그쪽을 쓴다 (read 오염 제거)
+    send_only = [r for r in rates if not r.with_read]
+    pool = send_only or rates
+
+    ok = [r for r in pool
           if r.achieved_hz >= 0.9 * r.target_hz
           and (math.isnan(r.jitter_ratio) or r.jitter_ratio < 2.0)]
     ceiling = max((r.target_hz for r in ok), default=0.0)
+
+    # 관측 가능한 천장 — 로봇 타임스탬프가 있을 때만 의미가 있다
+    obs = [r for r in rates
+           if r.with_read and not math.isnan(r.state_hz)
+           and r.state_hz >= 0.9 * r.target_hz]
+    state_ceiling = max((r.target_hz for r in obs), default=0.0)
+    ceiling_confirmed = bool(device_ts and state_ceiling >= ceiling > 0)
 
     bw = None
     for p in bode:
@@ -715,10 +805,17 @@ def verdict(rates: list[RateResult], bode: list[BodePoint],
             v = "FAIL (경로 B) — 재계획이 너무 느림"
             impl = (f"재계획 p95 {p95:.0f}ms 는 청크 경계마다 이미 지난 상황에 "
                     "반응한다는 뜻이다. 경로 A 천장을 함께 보고 판단할 것.")
-    elif ceiling >= 100:
+    elif ceiling >= 100 and ceiling_confirmed:
         v = "PASS (경로 A) — admittance 작동 가능. 분리 유지 가능"
         impl = ("빠른 Model 2가 의미를 가짐. 인터페이스 수정(그리퍼·dt·psi·상대 포즈) 후 "
                 "residual 구조로 진행.")
+    elif ceiling >= 100:
+        v = "PASS 미확인 (경로 A) — 천장은 높으나 로봇이 실행했다는 증거가 없음"
+        impl = (f"호출 rate {ceiling:.0f}Hz 는 나왔지만, 상태 갱신률로 확인되지 않았다"
+                f"{'' if device_ts else ' (로봇 타임스탬프 자체가 없음)'}. "
+                "송신이 fire-and-forget 비동기 publish 라면 이 값은 로봇의 성능이 "
+                "아니라 우리 for 문의 속도다. 이 상태로 PASS 를 인정하면 안 된다. "
+                "probe-live 로 상태 타임스탬프 유무를 먼저 확정할 것.")
     elif ceiling >= 50:
         v = "MARGINAL (경로 A) — 경계"
         impl = ("admittance 대역폭이 5-8Hz 수준. 느린 삽입/닦기는 되고 충격 흡수는 안 됨. "
@@ -733,6 +830,10 @@ def verdict(rates: list[RateResult], bode: list[BodePoint],
 
     return {
         "command_ceiling_hz": ceiling,
+        "command_ceiling_source": "send-only 램프" if send_only else "send+read 램프",
+        "state_ceiling_hz": state_ceiling,
+        "ceiling_confirmed": ceiling_confirmed,
+        "state_timestamp_source": ts_source,
         "tracking_bandwidth_3db_hz": bw,
         "replan_latency_p50_ms": replan.latency_p50_ms if replan else None,
         "replan_latency_p95_ms": replan.latency_p95_ms if replan else None,
@@ -760,6 +861,9 @@ def main() -> int:
     ap.add_argument("--rates", default="10,20,30,50,75,100,150,200,300,500")
     ap.add_argument("--bode-freqs", default="0.5,1,2,3,5,7,10")
     ap.add_argument("--skip-bode", action="store_true")
+    ap.add_argument("--ramp-mode", default="both",
+                    choices=["both", "send-only", "send-read"],
+                    help="PART A 램프 방식. both 면 두 번 돌려 천장을 병기한다")
     ap.add_argument("--skip-replan", action="store_true",
                     help="PART C(궤적 덮어쓰기 재계획 지연) 건너뜀")
     ap.add_argument("--replan-trials", type=int, default=12)
@@ -809,20 +913,30 @@ def main() -> int:
     }
 
     try:
-        print("── PART A — 명령 rate 램프 " + "─" * 40)
-        print(f"{'target':>8} {'achieved':>9} {'p50':>8} {'p99':>8} {'p99.9':>8} "
-              f"{'max':>8} {'jitter':>7} {'state_uniq':>11}")
         rate_results: list[RateResult] = []
-        for hz in rates:
-            r = measure_rate(ad, hz, args.dwell, amp, center)
-            rate_results.append(r)
-            print(f"{r.target_hz:8.0f} {r.achieved_hz:9.1f} {r.send_p50_ms:8.2f} "
-                  f"{r.send_p99_ms:8.2f} {r.send_p999_ms:8.2f} {r.send_max_ms:8.2f} "
-                  f"{r.jitter_ratio:7.2f} {r.unique_state_frac:11.2f}")
-            # 목표의 절반도 못 내면 천장을 지난 것
-            if r.achieved_hz < 0.5 * r.target_hz:
-                print(f"  → 달성률 50% 미만. 천장 통과로 보고 램프 중단.")
-                break
+        # send-only 를 먼저 — 순수 명령 천장. 그다음 send+read 로 관측 가능성까지.
+        # 나눠 재지 않으면 천장이 낮게 나왔을 때 명령 탓인지 조회 탓인지 모른다.
+        modes = ([(False, "send-only  (순수 명령 천장)"),
+                  (True, "send+read  (관측 포함)")]
+                 if args.ramp_mode == "both"
+                 else [(args.ramp_mode == "send-read", args.ramp_mode)])
+
+        for do_read, label in modes:
+            print(f"\n── PART A — 명령 rate 램프 · {label} " + "─" * 18)
+            print(f"{'target':>8} {'achieved':>9} {'p50':>8} {'p99':>8} {'p99.9':>8} "
+                  f"{'max':>8} {'jitter':>7} {'state_uniq':>11} {'state_hz':>9}")
+            for hz in rates:
+                r = measure_rate(ad, hz, args.dwell, amp, center, do_read=do_read)
+                rate_results.append(r)
+                uq = "—" if math.isnan(r.unique_state_frac) else f"{r.unique_state_frac:.2f}"
+                sh = "—" if math.isnan(r.state_hz) else f"{r.state_hz:.1f}"
+                print(f"{r.target_hz:8.0f} {r.achieved_hz:9.1f} {r.send_p50_ms:8.2f} "
+                      f"{r.send_p99_ms:8.2f} {r.send_p999_ms:8.2f} {r.send_max_ms:8.2f} "
+                      f"{r.jitter_ratio:7.2f} {uq:>11} {sh:>9}")
+                # 목표의 절반도 못 내면 천장을 지난 것
+                if r.achieved_hz < 0.5 * r.target_hz:
+                    print(f"  → 달성률 50% 미만. 천장 통과로 보고 램프 중단.")
+                    break
         results["rate_ramp"] = [asdict(r) for r in rate_results]
 
         bode_results: list[BodePoint] = []
@@ -861,14 +975,17 @@ def main() -> int:
             results["wrench_sample"] = w
             print(f"\n  손목 F/T 표본: {[round(x, 3) for x in w]}")
 
-        v = verdict(rate_results, bode_results, replan)
+        v = verdict(rate_results, bode_results, replan, ts_source=ad.ts_source)
         results["verdict"] = v
 
         print("\n" + "=" * 72)
         print("판정")
         print("=" * 72)
         print(f"  주 기준            : {v['primary_criterion']}")
-        print(f"  명령 rate 천장     : {v['command_ceiling_hz']:.0f} Hz   (경로 A)")
+        print(f"  명령 rate 천장     : {v['command_ceiling_hz']:.0f} Hz   (경로 A, "
+              f"{v['command_ceiling_source']})")
+        print(f"  관측 가능 천장     : {v['state_ceiling_hz']:.0f} Hz   "
+              f"→ 천장 확인 {'✅' if v['ceiling_confirmed'] else '❌ 미확인'}")
         bw = v["tracking_bandwidth_3db_hz"]
         print(f"  추종 대역폭(-3dB)  : {bw if bw else '측정 범위 내 없음'} Hz")
         if v["replan_latency_p95_ms"] is not None:
@@ -877,7 +994,8 @@ def main() -> int:
             print(f"  재계획 지연        : 측정 못 함 (경로 B 미확보)")
         if ad.ts_source == "host_monotonic":
             print(f"\n  ⚠️ 상태 타임스탬프가 호스트 시계입니다 — state_dt_*/unique_state_frac")
-            print(f"     은 로봇 응답이 아니라 우리 루프를 잰 값입니다.")
+            print(f"     은 로봇 응답이 아니라 우리 루프를 잰 값입니다. 그래서 천장을")
+            print(f"     '확인됨'으로 승격할 수 없습니다.")
         print(f"\n  → {v['verdict']}")
         print(f"     {v['implication']}")
 

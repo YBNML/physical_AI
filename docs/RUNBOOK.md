@@ -95,7 +95,7 @@ make probe-live
 | `get_joint_names()` 실제 순서 | RoboCOIN(21-D) vs SDK 레이아웃 불일치로 이미 한 번 데였습니다. 이름으로 인덱싱하면 그 오염이 사라집니다 |
 | `get_force_sensor_data(LEFT_WRIST_FORCE)` 실값 | **손목 F/T 가 실제로 붙어 있고 값을 주는지** — §6 항목 3 |
 | `get_gripper_state()` / `get_suction_cup_state()` | **엔드이펙터 좌우 구성** 단서 — §6 항목 1 |
-| `get_sensor_extrinsic(...)` | **헤드 카메라 extrinsic** — §7 항목 3이 벤더 문의에서 자체 확인으로 |
+| `get_sensor_extrinsic(...)` | **헤드 카메라 extrinsic** — §7 항목 4가 벤더 문의에서 자체 확인으로 |
 | `GalbotMotion.forward_kinematics_by_state` | **SDK FK 와 우리 FK 대조** — URDF만으로 유도한 우리 FK가 어긋나면 조용히 깨집니다 |
 
 **📩 알려주실 것**: `sdk_surface_*.md` 와 `sdk_live_*.md` 파일 그대로.

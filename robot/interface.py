@@ -46,7 +46,10 @@ class Frame(IntEnum):
     """
     TORSO_BASE = 0      # torso_base_link — Model 2 의 입력 프레임
     HEAD = 1            # head_link2 — Model 1 의 내부 표현으로만 허용
-    WORLD = 2
+    WORLD = 2           # ⚠️ **선언만 있고 미구현.** validate() 가 TORSO_BASE 외
+                        #    전부 거부하고, base/world 변환 코드도 아직 없다.
+                        #    구현하려면 base_link→torso_base_link 의 다리 5-DoF 를
+                        #    태워야 한다 (robot/g1_kinematics.py 의 T7 참조).
 
 
 class Phase(IntEnum):
@@ -109,7 +112,15 @@ class Waypoint:
     dt: float                       # [s] 이 waypoint 까지의 시간
                                     #      없으면 접근 속도 = Δpose ÷ 추론 jitter
                                     #      → 동일 명령에 접촉력 ~35% 변동
-    psi: float                      # [rad] arm angle. 7-DoF 를 완전 결정시킴
+    psi: float                      # [rad] arm angle. 7-DoF 를 완전 결정시킴.
+                                    #   psi=0 규약: 어깨→손목 축과 torso_base_link
+                                    #   의 +Z 를 포함하는 평면.
+                                    #   ⚠️ **이 프로젝트 고유 규약이다.** 대응하는
+                                    #   SDK 규약이 없다 — SDK IK 는 SeedType 기반
+                                    #   샘플링이고 redundancy 파라미터를 표면에
+                                    #   노출하지 않는다. 수신 측이 이 한 줄 없이는
+                                    #   규약을 재구성할 수 없으므로 여기 박아둔다.
+                                    #   정의 원본: robot/g1_kinematics.py arm_angle()
     stiffness_trans: float = 500.0  # [N/m]
     stiffness_rot: float = 20.0     # [Nm/rad]
     squeeze_force: float = 0.0      # [N] 파지축 방향, 부호 있음
