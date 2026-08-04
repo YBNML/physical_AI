@@ -69,7 +69,9 @@ import sys
 
 import numpy as np
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "robot"))
+import sdk_entry  # noqa: E402
 from g1_kinematics import (            # noqa: E402
     G1Arm, se3_inv, pose_error, identify_tip_frame, TIP_CANDIDATES,
 )
@@ -339,7 +341,16 @@ def run_live(n: int, side: str, ref_frame: str, out: str) -> int:
               "(bash 필요)", file=sys.stderr)
         return 2
 
-    motion = sdk.GalbotMotion()
+    # ⚠️ GalbotMotion() 직접 생성은 "No constructor defined!" 로 실패한다 (실측).
+    #    pybind11 이 py::init<>() 없이 바인딩했으므로 어딘가에서 받아와야 한다.
+    try:
+        motion, how = sdk_entry.acquire(sdk, "GalbotMotion")
+    except sdk_entry.EntryNotFound as e:
+        print(str(e), file=sys.stderr)
+        print("\n→ python tools/probe_sdk.py --entry 출력을 공유해주십시오.",
+              file=sys.stderr)
+        return 2
+    print(f"GalbotMotion 획득: {how}")
     if not motion.init():
         print("GalbotMotion.init() 실패 — 로봇 연결을 확인하십시오.", file=sys.stderr)
         return 2
@@ -428,6 +439,7 @@ def run_live(n: int, side: str, ref_frame: str, out: str) -> int:
         "side": side,
         "chain": chain,
         "reference_frame": ref_frame,
+        "motion_acquired_via": how,
         "n_samples": n,
         "tol": {"rel_pos_mm": REL_POS_TOL_MM, "rel_rot_deg": REL_ROT_TOL_DEG},
         "best_match_frame": best,

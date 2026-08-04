@@ -60,6 +60,9 @@ import sys
 import traceback
 from typing import Any, Optional
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sdk_entry  # noqa: E402
+
 SETUP_HINT = (
     "GalbotSDK import 실패.\n"
     "  1) SDK 환경을 먼저 로드했습니까?\n"
@@ -93,6 +96,12 @@ FOCUS = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 _SIG_RE = re.compile(r"^\s*(?:\d+\.\s+)?([A-Za-z_]\w*)\((.*)\)\s*->\s*(.+?)\s*$")
+
+
+def _sig_name(sig: str) -> Optional[str]:
+    """시그니처 줄에서 함수명만. 매칭 안 되면 None."""
+    m = _SIG_RE.match(sig)
+    return m.group(1) if m else None
 
 
 def parse_pybind_doc(doc: Optional[str]) -> dict:
@@ -168,6 +177,11 @@ def describe_class(cls: Any, deep: bool = False) -> dict:
 
         doc = getattr(attr, "__doc__", None)
         parsed = parse_pybind_doc(doc)
+
+        # `staticmethod` 래퍼 자체의 docstring("staticmethod(function) -> method")이
+        # 딸려오는 경우가 있다. 시그니처의 함수명이 속성명과 다르면 버린다.
+        parsed["signatures"] = [s for s in parsed["signatures"]
+                                if _sig_name(s) in (name, None)]
 
         if isinstance(attr, property):
             out["properties"][name] = {
@@ -301,28 +315,20 @@ def _expand(v: Any) -> Any:
     return out or _short(v)
 
 
-def _construct(cls: Any, name: str) -> tuple[Optional[Any], dict]:
-    """생성자 인자를 모르므로 docstring 을 보고 몇 가지 패턴을 시도한다."""
-    doc = parse_pybind_doc(getattr(cls.__init__, "__doc__", None))
-    attempts: list[dict] = []
+def _construct(sdk: Any, name: str) -> tuple[Optional[Any], dict]:
+    """핸들 획득. 여러 전략을 시도하고 실패 시 정확한 진단을 담는다.
 
-    candidates: list[tuple[str, tuple, dict]] = [
-        ("()", (), {}),
-        ("(machine_type=?)", (), {}),        # 아래에서 enum 이 있으면 채운다
-    ]
-    # MachineType 이 있으면 그 멤버들로도 시도
-    candidates = [candidates[0]]
-
-    for label, a, k in candidates:
-        try:
-            obj = cls(*a, **k)
-            attempts.append({"pattern": label, "ok": True})
-            return obj, {"attempts": attempts, "init_doc": doc}
-        except Exception as e:
-            attempts.append({"pattern": label, "ok": False,
-                             "error": f"{type(e).__name__}: {e}"[:300]})
-
-    return None, {"attempts": attempts, "init_doc": doc}
+    2026-07-31 — `GalbotMotion()` 이 "No constructor defined!" 로 실패했다.
+    pybind11 이 py::init<>() 없이 바인딩한 것이므로 직접 생성이 아니라
+    어딘가에서 받아오는 구조다. 그래서 sdk_entry 로 탐색을 위임한다.
+    """
+    cls = getattr(sdk, name, None)
+    doc = parse_pybind_doc(getattr(getattr(cls, "__init__", None), "__doc__", None))
+    try:
+        obj, how = sdk_entry.acquire(sdk, name)
+        return obj, {"ok": True, "method": how, "init_doc": doc}
+    except sdk_entry.EntryNotFound as e:
+        return None, {"ok": False, "diagnosis": str(e), "init_doc": doc}
 
 
 def probe_live(g: Any) -> dict:
@@ -334,13 +340,12 @@ def probe_live(g: Any) -> dict:
         live["GalbotRobot"] = {"ok": False, "error": "심볼 없음"}
         return live
 
-    robot, ctor = _construct(g.GalbotRobot, "GalbotRobot")
+    robot, ctor = _construct(g, "GalbotRobot")
     live["GalbotRobot_ctor"] = ctor
     if robot is None:
-        live["GalbotRobot"] = {
-            "ok": False,
-            "error": "생성 실패 — init_doc 의 시그니처를 보고 인자를 채워야 합니다.",
-        }
+        live["GalbotRobot"] = {"ok": False,
+                               "error": ctor.get("diagnosis", "획득 실패")}
+        print("\n" + ctor.get("diagnosis", "GalbotRobot 획득 실패"))
         return live
 
     READ_CALLS = [
@@ -404,7 +409,7 @@ def probe_live(g: Any) -> dict:
 
     # ── GalbotMotion FK — 우리 자체 FK 와 대조할 근거 ────────────────────────
     if hasattr(g, "GalbotMotion"):
-        motion, mctor = _construct(g.GalbotMotion, "GalbotMotion")
+        motion, mctor = _construct(g, "GalbotMotion")
         live["GalbotMotion_ctor"] = mctor
         if motion is not None:
             for m in ("get_robot_states", "get_chain_joint_state"):
@@ -660,6 +665,8 @@ def main() -> int:
                     help="로봇에 연결해 읽기 전용 호출 시도 (움직이지 않음)")
     ap.add_argument("--self-test", action="store_true",
                     help="SDK 없이 파서/안전차단 검증 (Mac 가능)")
+    ap.add_argument("--entry", action="store_true",
+                    help="GalbotRobot/GalbotMotion 진입점 조사 + __init__.py 원문 출력")
     args = ap.parse_args()
 
     if args.self_test:
@@ -674,6 +681,10 @@ def main() -> int:
     print("=" * 78)
     print("GalbotSDK 표면 조사")
     print("=" * 78)
+    if args.entry:
+        print(sdk_entry.entry_report(g))
+        return 0
+
     print(f"  모듈 : {getattr(g, '__file__', '?')}")
     print(f"  플랫폼: {sys.platform}  python {sys.version.split()[0]}")
 

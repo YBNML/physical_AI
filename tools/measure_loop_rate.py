@@ -35,11 +35,15 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
 import sys
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Callable, Optional
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sdk_entry  # noqa: E402
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SDK 어댑터
@@ -169,13 +173,21 @@ class G1Adapter:
         self._sdk = sdk
         print(f"[adapter] galbot_sdk {getattr(sdk, '__file__', '?')}")
 
-        self._robot = sdk.GalbotRobot()
+        # ⚠️ GalbotRobot() 직접 생성은 실패할 수 있다 — pybind11 이 py::init<>()
+        #    없이 바인딩한 클래스는 "No constructor defined!" 가 난다 (GalbotMotion
+        #    에서 실측). 그래서 획득 전략을 sdk_entry 에 위임한다.
+        try:
+            self._robot, how = sdk_entry.acquire(sdk, "GalbotRobot")
+        except sdk_entry.EntryNotFound as e:
+            sys.exit(f"[adapter] {e}\n\n"
+                     "→ python tools/probe_sdk.py --entry 로 진입점을 찾으십시오.")
+        print(f"[adapter] GalbotRobot 획득: {how}")
         # init(enable_sensor_set) — 센서를 안 켜면 카메라 스트림 비용이 안 든다.
         # F/T 는 SensorType 이 아니라 GalbotOneFoxtrotSensor 라 여기 포함되지 않는다.
         if not self._robot.init(set()):
             sys.exit("[adapter] GalbotRobot.init() 이 False 를 반환했습니다. "
                      "로봇 전원/네트워크를 확인하십시오.")
-        self.resolved["ctor"] = "GalbotRobot(); init(set())"
+        self.resolved["ctor"] = f"{how}; init(set())"
         print(f"[adapter] init OK · is_running={self._robot.is_running()}")
 
         self._groups = list(self._robot.get_joint_group_names())

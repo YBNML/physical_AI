@@ -44,7 +44,7 @@ OUT        ?= gate1_results_$(HOST)_$(MACHINE).json
 SDK_SETUP  ?= /opt/galbot/galbot_sdk/linux-x86_64-gcc940/setup.sh
 
 .DEFAULT_GOAL := help
-.PHONY: help setup check test gate1 gate1-real probe probe-check probe-live fk-check analysis inspect e0-check e0-smoke bench lock clean
+.PHONY: help setup check test gate1 gate1-real probe probe-check probe-live probe-entry fk-check analysis inspect e0-check e0-smoke bench lock clean
 
 # ─────────────────────────────────────────────────────────────────────────────
 help:  ## [모든 기계]
@@ -69,6 +69,7 @@ help:  ## [모든 기계]
 	@echo "    make probe        [회사 Linux]  GalbotSDK 시그니처 추출 (로봇 불필요)"
 	@echo "    make probe-live   [회사 Linux + 로봇]  읽기 전용 실물 조회 (안 움직임)"
 	@echo "    make fk-check     [회사 Linux + 로봇]  SDK FK 와 우리 FK 대조 (안 움직임)"
+	@echo "    make probe-entry  [회사 Linux]  ⚠️ 핸들 획득이 막혔을 때 진입점 조사"
 	@echo ""
 	@echo "  실측"
 	@echo "    make gate1-real   [회사 Linux + 로봇]  ⚠️ 실기체가 움직인다"
@@ -127,6 +128,14 @@ probe:  ## [회사 Linux] 로봇 불필요
 		echo "  찾기:  find /opt -maxdepth 6 -type d -name galbot_sdk"; exit 1; }
 	. $(SDK_SETUP) && $(PY) tools/probe_sdk.py --focus \
 		--out sdk_surface_$(MACHINE).json --md sdk_surface_$(MACHINE).md
+
+# GalbotRobot/GalbotMotion 이 "No constructor defined!" 로 생성 안 될 때.
+# pybind11 이 py::init<>() 없이 바인딩한 클래스는 직접 생성이 아니라 어딘가에서
+# 받아오는 것이다. __init__.py 가 Python 소스이므로 거기 진입점이 있을 수 있다.
+probe-entry:  ## [회사 Linux] 진입점 조사. 로봇 불필요
+	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; exit 1; }
+	. $(SDK_SETUP) && $(PY) tools/probe_sdk.py --entry 2>&1 | tee sdk_entry_$(MACHINE).txt
+	@echo "→ sdk_entry_$(MACHINE).txt 를 공유해주십시오."
 
 probe-live:  ## [회사 Linux + 로봇] 읽기 전용. 움직이지 않는다
 	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; exit 1; }

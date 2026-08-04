@@ -86,7 +86,25 @@ make probe-live
 # 3) SDK FK 와 우리 FK 대조 — 로봇 전원 필요, 안 움직임
 make fk-check
 #    → robot/assets/fk_crosscheck_<hostname>.json
+
+# 4) ⚠️ 진입점 조사 — probe-live / fk-check 가 "No constructor defined!" 로
+#    막혔다면 이걸 돌리십시오
+make probe-entry
 ```
+
+> 🔴 **2026-07-31 미해결 — `GalbotRobot` / `GalbotMotion` 을 어떻게 얻는지 모릅니다.**
+>
+> ```
+> TypeError: galbot_sdk.GalbotMotion: No constructor defined!
+> ```
+>
+> 이건 pybind11 이 `py::init<>()` **없이** 바인딩한 클래스에서 나는 에러입니다.
+> 즉 이 클래스들은 **직접 생성하는 게 아니라 어딘가에서 받아오는** 것입니다.
+> `make probe-entry` 가 여러 획득 전략을 시도하고, `galbot_sdk/__init__.py` 원문을
+> 출력합니다 — 그 파일이 `.so` 가 아니라 **Python 소스**라서 진입점이 거기 있을
+> 가능성이 큽니다.
+>
+> 이게 풀리기 전까지 `probe-live` / `fk-check` / `gate1-real` 은 전부 막힙니다.
 
 **확정된 시그니처가 뒤집은 것 3가지** — 셋 다 측정을 무의미하게 만들 수 있었습니다.
 
