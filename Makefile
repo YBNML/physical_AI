@@ -113,6 +113,7 @@ gate1:  ## [모든 기계]
 #              손목 F/T 실값, 관절 이름 순서, 카메라 extrinsic 을 여기서 한 번에 얻는다.
 probe-check:  ## [모든 기계] SDK 없이 파서/안전차단 검증
 	$(PY) tools/probe_sdk.py --self-test
+	$(PY) tools/sdk_entry.py
 	$(PY) tools/fk_crosscheck.py --self-test
 
 # SDK FK 와 우리 FK 대조 — URDF 자기일관성을 벗어나는 첫 외부 검증.
