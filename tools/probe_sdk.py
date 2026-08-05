@@ -57,6 +57,7 @@ import json
 import os
 import re
 import sys
+import time
 import traceback
 from typing import Any, Optional
 
@@ -405,16 +406,32 @@ def probe_live(g: Any) -> dict:
     #      get_gripper_state(end_effector: str) -> GripperState
     #      get_dexterous_hand_state(end_effector: str) -> tuple
     #      get_suction_cup_state(end_effector: str) -> SuctionCupState
-    print("    → get_joint_group_names() 호출 중...", flush=True)
+    # ⚠️ init() 이 True 를 돌려줘도 **데이터가 아직 안 왔을 수 있다.**
+    #    온보드 실측: 같은 로봇에서 호출 순서만 바꿨더니 한 번은 그룹 7개,
+    #    한 번은 빈 리스트가 나왔다. init() 이 비동기이고 관절 정보가 메시지
+    #    버스로 뒤늦게 도착하는 것으로 보인다.
+    #    그래서 비어 있으면 잠깐 기다렸다 다시 본다. 첫 호출 결과를 그대로
+    #    믿으면 "로봇에 관절이 없다" 는 틀린 결론을 내게 된다.
     groups: list[str] = []
-    r = _try("get_joint_group_names", robot.get_joint_group_names)
-    live["get_joint_group_names"] = r
-    if r["ok"]:
+    deadline = time.time() + 10.0
+    attempt = 0
+    while time.time() < deadline:
+        attempt += 1
+        print(f"    → get_joint_group_names() 시도 {attempt}...", flush=True)
         try:
             groups = [str(x) for x in robot.get_joint_group_names()]
-        except Exception:
+        except Exception as e:
+            print(f"       예외: {type(e).__name__}: {e}", flush=True)
             groups = []
-    print(f"       그룹 {len(groups)}개: {groups}", flush=True)
+        if groups:
+            break
+        time.sleep(0.5)
+    live["get_joint_group_names"] = {"ok": bool(groups), "value": groups,
+                                     "attempts": attempt}
+    print(f"       그룹 {len(groups)}개 (시도 {attempt}회): {groups}", flush=True)
+    if not groups:
+        print("    ⚠️ 10초 동안 관절 그룹이 비어 있습니다. init() 은 True 였지만")
+        print("       관절 정보가 도착하지 않았습니다. 아래 조회는 건너뜁니다.")
 
     print("    → get_joint_names() 호출 중...", flush=True)
     live["get_joint_names"] = _try("get_joint_names", robot.get_joint_names)
@@ -461,6 +478,22 @@ def probe_live(g: Any) -> dict:
         _assert_readonly(m)
         print(f"    → {m}() ...", flush=True)
         live[m] = _try(m, getattr(robot, m))
+
+    # 기체 식별과 배터리는 눈에 띄게 요약한다. GATE-1 은 팔을 실제로 움직이므로
+    # 배터리가 낮으면 측정 중 셧다운이 날 수 있고, 그러면 측정이 무의미해진다.
+    try:
+        dev = robot.get_device_information()
+        bms = robot.get_bms_information()
+        print("\n  ── 기체 ─────────────────────────────────────────")
+        print(f"     model {dev.get('model')}  sn {dev.get('serial_number')}")
+        print(f"     firmware {dev.get('firmware_version')}")
+        lvl = bms.get("battery_level")
+        print(f"     battery {lvl}%  {bms.get('voltage')}V  {bms.get('current')}A")
+        if isinstance(lvl, (int, float)) and lvl < 30:
+            print(f"     ⚠️ 배터리 {lvl}% — GATE-1(실기체 동작) 전에 충전하십시오.")
+        live["summary"] = {"device": dev, "bms": bms}
+    except Exception as e:
+        print(f"  기체 요약 실패: {type(e).__name__}: {e}")
 
     # ── 손목 F/T ★★ 이게 이 probe 의 가장 큰 수확 ────────────────────────────
     if hasattr(robot, "get_force_sensor_data"):
@@ -853,5 +886,21 @@ def main() -> int:
     return 0
 
 
+def _hard_exit(code: int) -> None:
+    """SDK 소멸자를 건너뛰고 종료한다.
+
+    galbot_sdk 는 인터프리터 종료 시점에 SIGSEGV 로 죽는다 (온보드 실측 —
+    결과 파일 저장과 최종 안내를 다 출력한 뒤에 터졌다). 싱글톤 C++ 객체의
+    정적 소멸 순서 문제로 보이며 우리가 고칠 수 없다. 결과는 이미 디스크에
+    있으므로 버퍼만 비우고 os._exit 로 빠져나간다.
+    """
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(code)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    _hard_exit(main())

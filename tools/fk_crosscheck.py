@@ -429,7 +429,7 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
 
     arm = G1Arm(side)
     rng = np.random.default_rng(0)
-    q_lo, q_hi = arm.limits()
+    q_lo, q_hi = arm.limits   # property (괄호 없음)
 
     results: dict[str, dict] = {}
     for tip in TIP_CANDIDATES:
@@ -533,5 +533,22 @@ def main() -> int:
     return run_live(args.n, args.side, args.ref_frame, out, args.no_init)
 
 
+def _hard_exit(code: int) -> None:
+    """SDK 소멸자를 건너뛰고 종료한다.
+
+    galbot_sdk 는 인터프리터 종료 시점에 SIGSEGV / pthread_mutex assertion 으로
+    죽는다 (온보드 실측 — 결과 파일을 다 저장하고 "다음:" 안내까지 출력한 뒤에
+    터졌다). 싱글톤 C++ 객체의 정적 소멸 순서 문제로 보이며 우리가 고칠 수 없다.
+    결과는 이미 디스크에 있으므로, 버퍼만 비우고 os._exit 로 빠져나간다.
+    이걸 안 하면 make 가 실패로 판단해 후속 타겟이 안 돈다.
+    """
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(code)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    _hard_exit(main())
