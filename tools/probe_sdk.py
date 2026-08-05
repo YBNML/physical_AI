@@ -471,6 +471,37 @@ def probe_live(g: Any) -> dict:
             print(f"    → {m}('{ee}') ...", flush=True)
             live[f"{m}[{ee}]"] = _try(m, getattr(robot, m), ee)
 
+    # ★ 엔드이펙터 좌우 구성 판정 — 출처 3개가 답이 3개였던 항목이다.
+    #   API 가 값을 돌려주는지로 가른다:
+    #     GripperState 객체        → 평행 그리퍼 장착
+    #     ControlStatus.INVALID_INPUT → 그 종류 아님
+    #     None                     → 그 종류 아님
+    print("\n  ── 엔드이펙터 구성 ──────────────────────────────")
+    ee_verdict = {}
+    for ee in ee_names:
+        kinds = []
+        gs = live.get(f"get_gripper_state[{ee}]", {})
+        if gs.get("ok") and "GripperState" in str(gs.get("type", "")):
+            d = gs.get("detail") or {}
+            kinds.append("gripper")
+            print(f"     {ee}: 평행 그리퍼 ✅  "
+                  f"width={d.get('width')} pos={d.get('joint_positions')}")
+        dh = live.get(f"get_dexterous_hand_state[{ee}]", {})
+        if dh.get("ok") and "INVALID_INPUT" not in str(dh.get("repr", "")):
+            kinds.append("dexhand")
+        sc = live.get(f"get_suction_cup_state[{ee}]", {})
+        if sc.get("ok") and str(sc.get("repr")) not in ("None", ""):
+            kinds.append("suction")
+        if not kinds:
+            print(f"     {ee}: 판별 실패")
+        elif kinds != ["gripper"]:
+            print(f"     {ee}: {kinds}")
+        ee_verdict[ee] = kinds
+    live["end_effector_verdict"] = ee_verdict
+    if ee_verdict and all(v == ["gripper"] for v in ee_verdict.values()):
+        print("     → **양쪽 다 평행 그리퍼.** 석션컵/다지 핸드 없음.")
+        print("        양팔 협응 전제가 유지됩니다 (RUNBOOK §6 항목 1 종결).")
+
     # 프레임 이름 — fk_crosscheck 의 reference_frame 후보
     for m in ("get_frame_names", "get_device_information", "get_bms_information"):
         if not hasattr(robot, m):

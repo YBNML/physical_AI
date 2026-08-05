@@ -66,6 +66,7 @@ import math
 import os
 import socket
 import sys
+import time
 
 import numpy as np
 
@@ -396,6 +397,29 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
         print("   segfault 로 프로세스가 죽고 지금까지의 출력도 날아갑니다.")
         return 2
 
+    # ⚠️ init() 이 True 여도 **데이터가 아직 안 왔을 수 있다.** probe-live 에서는
+    #    get_chain_joint_state() 가 실값을 줬는데 여기서는 {} 였고, 그 상태로
+    #    forward_kinematics 를 부르니 DATA_FETCH_FAILED 가 났다.
+    #    관절 상태가 찰 때까지 기다린다. 안 기다리면 "FK 실패" 로 오진한다.
+    print("관절 상태 도착 대기...", flush=True)
+    cjs = {}
+    deadline = time.time() + 15.0
+    while time.time() < deadline:
+        try:
+            cjs = motion.get_chain_joint_state() or {}
+        except Exception as e:
+            print(f"  get_chain_joint_state 예외: {type(e).__name__}: {e}", flush=True)
+        if cjs:
+            break
+        time.sleep(0.5)
+    if cjs:
+        print(f"  ✅ 도착 — chain {sorted(cjs)}", flush=True)
+        for k in sorted(cjs):
+            print(f"     {k}: {len(cjs[k])}개 {[round(v,4) for v in cjs[k][:8]]}")
+    else:
+        print("  ⚠️ 15초 동안 관절 상태가 비어 있습니다. FK 가 DATA_FETCH_FAILED 로")
+        print("     실패할 가능성이 높습니다. 그래도 계속 진행합니다.")
+
     print("=" * 74)
     print("SDK FK vs 우리 FK 대조")
     print("=" * 74)
@@ -431,9 +455,36 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
     rng = np.random.default_rng(0)
     q_lo, q_hi = arm.limits   # property (괄호 없음)
 
+    # ⚠️ SDK 가 아는 링크만 시도한다. 우리 URDF 의 gripper 링크 이름들은
+    #    SDK 모델에 아예 없어서 INVALID_INPUT 이 났다 (실측). 존재하지 않는
+    #    프레임을 계속 두드리면 실패 원인이 "이름 없음" 인지 "데이터 없음" 인지
+    #    섞여서 진단이 흐려진다.
+    try:
+        sdk_links = set(motion.get_link_names(only_end_effector=False))
+    except Exception as e:
+        print(f"  get_link_names 실패: {e}")
+        sdk_links = set()
+    print(f"\n  SDK 링크 {len(sdk_links)}개")
+    wanted = [f"{side}_{t}" for t in TIP_CANDIDATES]
+    present = [w for w in wanted if w in sdk_links]
+    missing = [w for w in wanted if w not in sdk_links]
+    print(f"  우리 tip 후보 중 SDK 에 있는 것 : {present or '(없음)'}")
+    print(f"  우리 tip 후보 중 SDK 에 없는 것 : {missing or '(없음)'}")
+    if missing:
+        print("  → 없는 것은 건너뜁니다. SDK 모델에 그 링크가 없다는 뜻입니다.")
+    if not present:
+        print("\n  🔴 시도할 프레임이 없습니다. SDK 의 팔 관련 링크 목록:")
+        for ln in sorted(x for x in sdk_links if side in x):
+            print(f"     {ln}")
+        print("\n  → 위 목록에서 맞는 이름을 --tip 으로 지정하거나,")
+        print("     robot/g1_kinematics.py 의 TIP_CANDIDATES 를 갱신해야 합니다.")
+
     results: dict[str, dict] = {}
     for tip in TIP_CANDIDATES:
         frame = f"{side}_{tip}"
+        if sdk_links and frame not in sdk_links:
+            results[frame] = {"error": "SDK 링크 목록에 없음"}
+            continue
         ours, theirs = [], []
         bad = 0
         for _ in range(n):
