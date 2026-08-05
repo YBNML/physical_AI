@@ -59,9 +59,12 @@ SDK_AUTO   := $(firstword $(SDK_ARCH) $(SDK_ANY))
 # (/dev/null 을 source 하면 아무 일도 안 하고 성공한다).
 SDK_PRELOADED := $(shell $(PY) -c "import galbot_sdk" >/dev/null 2>&1 && echo yes)
 
-SDK_SETUP  ?= $(if $(SDK_AUTO),$(SDK_AUTO),\
+# ⚠️ $(strip) 필수. make 의 여러 줄 $(if) 는 연속행 공백을 결과에 남기고,
+#    그러면 `test "$(SDK_SETUP)" = /dev/null` 이 앞 공백 때문에 거짓이 된다.
+#    (맥에서 `SDK_SETUP :   /opt/...` 로 공백이 보여서 잡았다)
+SDK_SETUP  ?= $(strip $(if $(SDK_AUTO),$(SDK_AUTO),\
                 $(if $(SDK_PRELOADED),/dev/null,\
-                  /opt/galbot/galbot_sdk/linux-$(UNAME_M)-UNKNOWN/setup.sh))
+                  /opt/galbot/galbot_sdk/linux-$(UNAME_M)-UNKNOWN/setup.sh)))
 
 # SDK 경로 확인이 필요한 타겟들이 공통으로 부르는 검사.
 # 못 찾으면 실제로 무엇이 있는지 보여준다 — "없음" 만 찍고 끝내면 다음 수가 없다.
