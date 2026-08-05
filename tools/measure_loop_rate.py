@@ -58,6 +58,11 @@ import sdk_entry  # noqa: E402
 # ────────────────────────────────────────
 #   set_joint_commands(joint_commands: [JointCommand], joint_groups=[],
 #                      joint_names=[], time_from_start_s=10.0) -> ControlStatus
+#       ↳ 공식 문서 표현: "high-frequency, no interpolation".
+#         **이것이 스트리밍 경로다.** 벤더 예제는 time_from_start_s=0.0 을 쓴다.
+#   set_joint_commands_batch(trajectory: Trajectory) -> ControlStatus
+#       ↳ 공식 문서 표현: "multiple future frames".
+#         **이것이 action chunk 경로다.**
 #   set_joint_positions(joint_positions, joint_groups=[], joint_names=[],
 #                       is_blocking=True, speed_rad_s=0.2, timeout_s=15.0)
 #                      -> ControlStatus
@@ -81,7 +86,15 @@ import sdk_entry  # noqa: E402
 #     무인자 호출은 TypeError 다.
 #  3. `set_joint_commands` 의 `time_from_start_s` 기본값이 **10.0 초**다.
 #     고속 스트리밍에서 그대로 두면 매 명령이 "10초에 걸쳐 도달" 을 뜻해
-#     사실상 움직이지 않는다. 짧은 지평을 명시한다.
+#     사실상 움직이지 않는다. 벤더 고주파 예제가 쓰는 **0.0**(보간 없음)이
+#     스트리밍의 올바른 값이다.
+#
+# ⚠️ 공식 문서(1.7.0)와 실물 바이너리의 **인자 이름이 다르다.** 바이너리가 진실이다:
+#       문서 joint_pos          → 실물 joint_positions
+#       문서 max_speed          → 실물 speed_rad_s
+#       문서 time_from_start_sec→ 실물 time_from_start_s
+#       문서 is_block           → 실물 is_blocking
+#    그래서 이 파일은 문서를 그대로 베끼지 않고 probe 로 뽑은 시그니처를 쓴다.
 #
 # 관측 가능성 — 여기서 방향이 바뀌었다
 # ────────────────────────────────────
@@ -126,12 +139,14 @@ class G1Adapter:
     """
 
     def __init__(self, dry_run: bool = False, joint_name: str = "left_arm_joint4",
-                 tau_s: float = 0.015, horizon_s: float = 0.1,
+                 tau_s: float = 0.015, horizon_s: float = 0.0,
                  send_api: str = "commands"):
         self.dry_run = dry_run
         self.joint_name = joint_name
         self.horizon_s = horizon_s          # time_from_start_s
         self.send_api = send_api            # "commands" | "positions"
+        # PART C 경로. batch = 공식 문서의 "multiple future frames" = chunk 경로.
+        self.traj_api = "trajectory"        # "trajectory" | "batch"
         self._robot = None
         self._motion = None
         self._sdk = None
@@ -400,7 +415,8 @@ class G1Adapter:
         return T
 
     def send_trajectory(self, times_s: list[float], positions_rad: list[float],
-                        stop_first: bool = False) -> bool:
+                        stop_first: bool = False,
+                        api: Optional[str] = None) -> bool:
         """execute_joint_trajectory 로 궤적을 발행한다 (non-blocking).
 
         ⚠️ TARGET_TYPE_OVERRIDE 는 여기 인자가 아니다 (SingoriXTarget 경로 소속).
@@ -414,23 +430,32 @@ class G1Adapter:
             return True
         if self._robot is None:
             return False
+        use = api or self.traj_api
         try:
             if stop_first:
                 self._robot.stop_trajectory_execution()
             traj = self._build_trajectory(times_s, positions_rad)
-            st = self._robot.execute_joint_trajectory(traj, is_blocking=False)
+            if use == "batch":
+                # 공식 문서: "multiple future frames" — action chunk 경로다.
+                st = self._robot.set_joint_commands_batch(traj)
+                label = "set_joint_commands_batch(Trajectory)"
+            else:
+                st = self._robot.execute_joint_trajectory(traj, is_blocking=False)
+                label = "execute_joint_trajectory(Trajectory, is_blocking=False)"
             self._track(st)
             self.traj_supported = True
             self.resolved["trajectory"] = (
-                "execute_joint_trajectory(Trajectory, is_blocking=False)"
-                + (" + stop_first" if stop_first else ""))
+                label + (" + stop_first" if stop_first else ""))
             return self._name_of(st) in ("SUCCESS", "IN_PROGRESS", "RUNNING")
         except Exception as e:
             if self.traj_supported is None:
                 self.traj_supported = False
-                print(f"\n[adapter] 궤적 경로(PART C) 실패: {type(e).__name__}: {e}")
-                print("  execute_joint_trajectory 실제 시그니처:")
-                print("  " + _doc(self._robot.execute_joint_trajectory).splitlines()[0])
+                print(f"\n[adapter] 궤적 경로(PART C, {use}) 실패: "
+                      f"{type(e).__name__}: {e}")
+                for m in ("execute_joint_trajectory", "set_joint_commands_batch"):
+                    if hasattr(self._robot, m):
+                        print(f"  {m} 실제 시그니처:")
+                        print("  " + _doc(getattr(self._robot, m)).splitlines()[0])
             return False
 
     def traj_status(self) -> list[str]:
@@ -451,15 +476,20 @@ class G1Adapter:
     def close(self) -> None:
         if self.dry_run or self._robot is None:
             return
+        # 공식 문서의 종료 시퀀스:
+        #   request_shutdown() → wait_for_shutdown() → destroy()
         for fn, arg in (("stop_trajectory_execution", None),
                         ("release_controller", self._arm_group),
+                        ("request_shutdown", None),
+                        ("wait_for_shutdown", None),
                         ("destroy", None)):
-            if hasattr(self._robot, fn):
-                try:
-                    getattr(self._robot, fn)() if arg is None \
-                        else getattr(self._robot, fn)(arg)
-                except Exception:
-                    pass
+            if not hasattr(self._robot, fn):
+                continue
+            try:
+                getattr(self._robot, fn)() if arg is None \
+                    else getattr(self._robot, fn)(arg)
+            except Exception as e:
+                print(f"[adapter] close: {fn} → {type(e).__name__}: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -893,9 +923,10 @@ def main() -> int:
                     choices=["commands", "positions"],
                     help="경로 A 에 쓸 API. commands=set_joint_commands "
                          "(time_from_start_s 지정 가능), positions=set_joint_positions")
-    ap.add_argument("--horizon-s", type=float, default=0.1,
+    ap.add_argument("--horizon-s", type=float, default=0.0,
                     help="set_joint_commands 의 time_from_start_s. "
-                         "SDK 기본 10.0 초는 고속 스트리밍에 쓸 수 없다")
+                         "SDK 기본값 10.0 은 고속 스트리밍에 쓸 수 없고, "
+                         "벤더 고주파 예제는 0.0(보간 없음)을 쓴다")
     ap.add_argument("--amp-deg", type=float, default=2.0, help="진폭 (도)")
     ap.add_argument("--center-deg", type=float, default=0.0)
     ap.add_argument("--dwell", type=float, default=6.0, help="rate당 측정 시간 (초)")
@@ -909,6 +940,8 @@ def main() -> int:
                     help="PART C(궤적 재발행 지연) 건너뜀")
     ap.add_argument("--skip-stopfirst", action="store_true",
                     help="PART C 의 stop_trajectory_execution 변형만 건너뜀")
+    ap.add_argument("--skip-batch", action="store_true",
+                    help="PART C 의 set_joint_commands_batch 변형만 건너뜀")
     ap.add_argument("--replan-trials", type=int, default=12)
     ap.add_argument("--out", default="gate1_results.json")
     args = ap.parse_args()
@@ -1003,20 +1036,30 @@ def main() -> int:
             print("   execute_joint_trajectory(Trajectory, is_blocking=False)")
             print("   ⚠️ TARGET_TYPE_OVERRIDE 는 이 호출의 인자가 아니다 —")
             print("      SingoriXTarget 경로 소속. 덮어쓰기 의미론을 실측한다.")
-            variants = [(False, "재발행만 (대체되는가?)")]
+            variants = [("trajectory", False, "execute_joint_trajectory 재발행")]
             if not args.skip_stopfirst:
-                variants.append((True, "stop_trajectory_execution 후 재발행"))
+                variants.append(("trajectory", True,
+                                 "stop_trajectory_execution 후 재발행"))
+            if not args.skip_batch:
+                # 공식 문서가 "multiple future frames" 라고 부르는 경로.
+                # action chunk 스트리밍의 진짜 후보다.
+                variants.append(("batch", False,
+                                 "set_joint_commands_batch (chunk 경로)"))
 
-            for sf, label in variants:
+            for tapi, sf, label in variants:
                 print(f"\n   [{label}]")
+                ad.traj_api = tapi
                 r = measure_replan(ad, args.replan_trials, amp, center,
                                    stop_first=sf)
                 if r is None:
                     print("   건너뜀 — 궤적 경로를 쓸 수 없습니다 (위 진단 참조).")
                     continue
-                key = "replan_stopfirst" if sf else "replan"
+                key = ("replan_batch" if tapi == "batch"
+                       else "replan_stopfirst" if sf else "replan")
                 results[key] = asdict(r)
-                if not sf:
+                results.setdefault("replan_calls", {})[key] = \
+                    ad.resolved.get("trajectory")
+                if tapi == "trajectory" and not sf:
                     replan = r
                 print(f"   p50 {r.latency_p50_ms:.2f} ms · "
                       f"p95 {r.latency_p95_ms:.2f} ms · "
@@ -1027,6 +1070,17 @@ def main() -> int:
                     print(f"   궤적 상태: {st}")
 
             results["meta"]["trajectory_call"] = ad.resolved.get("trajectory")
+            if "replan_batch" in results and "replan" in results:
+                db = (results["replan_batch"]["latency_p50_ms"]
+                      - results["replan"]["latency_p50_ms"])
+                print(f"\n   batch vs trajectory 차이 {db:+.1f} ms →", end=" ")
+                if db < -5:
+                    print("batch 가 빠르다. chunk 스트리밍은 batch 로 갈 것.")
+                elif db > 5:
+                    print("trajectory 가 빠르다.")
+                else:
+                    print("사실상 동일.")
+
             if "replan" in results and "replan_stopfirst" in results:
                 d = (results["replan_stopfirst"]["latency_p50_ms"]
                      - results["replan"]["latency_p50_ms"])
