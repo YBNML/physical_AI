@@ -51,25 +51,37 @@ OUT        ?= gate1_results_$(HOST)_$(MACHINE).json
 UNAME_M    := $(shell uname -m)
 SDK_ARCH   := $(wildcard /opt/galbot/galbot_sdk/linux-$(UNAME_M)-*/setup.sh)
 SDK_ANY    := $(wildcard /opt/galbot/galbot_sdk/*/setup.sh)
-SDK_SETUP  ?= $(firstword $(SDK_ARCH) $(SDK_ANY) \
-                /opt/galbot/galbot_sdk/linux-$(UNAME_M)-UNKNOWN/setup.sh)
+SDK_AUTO   := $(firstword $(SDK_ARCH) $(SDK_ANY))
+
+# 로봇 온보드(galbot-echo)에는 setup.sh 가 아예 없다. SDK 가 /data/galbot/lib 에
+# 있고 PYTHONPATH/LD_LIBRARY_PATH 가 시스템에 이미 잡혀 있어 **그냥 import 된다.**
+# 그래서 "이미 import 되는가" 를 먼저 보고, 되면 source 를 건너뛴다
+# (/dev/null 을 source 하면 아무 일도 안 하고 성공한다).
+SDK_PRELOADED := $(shell $(PY) -c "import galbot_sdk" >/dev/null 2>&1 && echo yes)
+
+SDK_SETUP  ?= $(if $(SDK_AUTO),$(SDK_AUTO),\
+                $(if $(SDK_PRELOADED),/dev/null,\
+                  /opt/galbot/galbot_sdk/linux-$(UNAME_M)-UNKNOWN/setup.sh))
 
 # SDK 경로 확인이 필요한 타겟들이 공통으로 부르는 검사.
 # 못 찾으면 실제로 무엇이 있는지 보여준다 — "없음" 만 찍고 끝내면 다음 수가 없다.
+# ⚠️ /dev/null 은 문자 디바이스라 `test -f` 가 거짓이다. 별도로 허용해야 한다.
 define REQUIRE_SDK
-	@test -f "$(SDK_SETUP)" || { \
-		echo "SDK setup.sh 를 찾지 못했습니다: $(SDK_SETUP)"; \
-		echo "  아키텍처: $(UNAME_M)"; \
+	@test "$(SDK_SETUP)" = /dev/null -o -f "$(SDK_SETUP)" || { \
+		echo "SDK 를 찾지 못했습니다."; \
+		echo "  아키텍처   : $(UNAME_M)"; \
+		echo "  시도한 경로: $(SDK_SETUP)"; \
+		echo "  그냥 import: $(if $(SDK_PRELOADED),됨,안 됨)"; \
 		echo ""; \
 		echo "  /opt/galbot 아래에 실제로 있는 것:"; \
 		ls -1 /opt/galbot/galbot_sdk/ 2>/dev/null | sed 's/^/    /' \
 			|| echo "    (/opt/galbot/galbot_sdk 자체가 없습니다)"; \
 		echo ""; \
-		echo "  전체 검색:"; \
-		echo "    find / -name setup.sh -path '*galbot*' 2>/dev/null"; \
-		echo ""; \
-		echo "  찾으면:  make SDK_SETUP=/실제/경로/setup.sh $@"; \
+		echo "  → make find-sdk   로 이 기계에서 실제로 검색하십시오."; \
+		echo "  → 찾으면:  make SDK_SETUP=/실제/경로/setup.sh $@"; \
 		exit 1; }
+	@test "$(SDK_SETUP)" != /dev/null || \
+		echo "[sdk] 이미 환경에 잡혀 있어 source 를 건너뜁니다 (PYTHONPATH 사용)"
 endef
 
 .DEFAULT_GOAL := help
@@ -150,8 +162,10 @@ sdk-where:  ## [모든 기계] SDK 경로/파이썬/의존성 확인
 	@$(PY) -c "import sys;print('  버전     :',sys.version.split()[0])"
 	@$(PY) -c "import numpy;print('  numpy    :',numpy.__version__)" 2>/dev/null \
 		|| echo "  numpy    : 없음 (fk-check 만 필요. probe/gate1 은 stdlib 만 씀)"
+	@echo "SDK 그냥 import : $(if $(SDK_PRELOADED),✅ 됨 (source 불필요),❌ 안 됨)"
 	@echo "SDK_SETUP  : $(SDK_SETUP)"
-	@test -f "$(SDK_SETUP)" && echo "  → 있음 ✅" || echo "  → 없음 ❌"
+	@test "$(SDK_SETUP)" = /dev/null && echo "  → source 생략 모드 ✅" \
+		|| { test -f "$(SDK_SETUP)" && echo "  → 있음 ✅" || echo "  → 없음 ❌"; }
 	@echo ""
 	@echo "/opt/galbot/galbot_sdk 내용:"
 	@ls -1 /opt/galbot/galbot_sdk/ 2>/dev/null | sed 's/^/  /' || echo "  (없음)"
