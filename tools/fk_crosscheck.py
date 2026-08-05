@@ -332,7 +332,8 @@ def self_test() -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def run_live(n: int, side: str, ref_frame: str, out: str) -> int:
+def run_live(n: int, side: str, ref_frame: str, out: str,
+             no_init: bool = False) -> int:
     try:
         import galbot_sdk as sdk
     except ImportError as e:
@@ -350,9 +351,47 @@ def run_live(n: int, side: str, ref_frame: str, out: str) -> int:
         print("\n→ python tools/probe_sdk.py --entry 출력을 공유해주십시오.",
               file=sys.stderr)
         return 2
-    print(f"GalbotMotion 획득: {how}")
-    if not motion.init():
-        print("GalbotMotion.init() 실패 — 로봇 연결을 확인하십시오.", file=sys.stderr)
+    print(f"GalbotMotion 획득: {how}", flush=True)
+    if no_init:
+        print("--no-init: init() 을 건너뜁니다 (forward_kinematics 는 순수 계산)")
+        inited = True
+    else:
+        print("GalbotMotion.init() 호출 중...", flush=True)
+        inited = motion.init()
+        print(f"GalbotMotion.init() → {inited}", flush=True)
+    if not inited:
+        print("\n" + "=" * 74)
+        print("init() 이 False 를 반환했습니다. 무엇이 되는지 확인해봅니다.")
+        print("=" * 74)
+        # init 실패 원인을 좁힌다 — 읽기 전용 호출만 시도한다
+        for m in ("get_supported_chains", "get_supported_frames",
+                  "get_link_names", "get_chain_joint_state", "get_robot_states"):
+            if not hasattr(motion, m):
+                continue
+            try:
+                print(f"  {m}() → {str(getattr(motion, m)())[:200]}", flush=True)
+            except Exception as e:
+                print(f"  {m}() → {type(e).__name__}: {str(e)[:160]}", flush=True)
+        try:
+            robot, rhow = sdk_entry.acquire(sdk, "GalbotRobot")
+            print(f"\n  GalbotRobot 획득: {rhow}")
+            for m in ("is_running", "get_device_information", "get_joint_group_names"):
+                if hasattr(robot, m):
+                    try:
+                        print(f"  robot.{m}() → {str(getattr(robot, m)())[:200]}")
+                    except Exception as e:
+                        print(f"  robot.{m}() → {type(e).__name__}: {str(e)[:160]}")
+        except Exception as e:
+            print(f"  GalbotRobot 도 획득 실패: {e}")
+
+        print("\n확인할 것:")
+        print("  1. 로봇 전원이 켜져 있고 부팅이 끝났습니까?")
+        print("  2. 이 PC 가 로봇 LAN 에 연결돼 있습니까? (ping 으로 확인)")
+        print("  3. 다른 프로세스가 이미 SDK 를 점유하고 있지 않습니까?")
+        print("     (SDK 는 싱글톤 구조라 중복 연결이 막힐 수 있습니다)")
+        print("  4. `make probe-entry` 출력을 함께 공유해주십시오.")
+        print("\n→ forward_kinematics 는 순수 계산이라 로봇 없이도 될 수 있습니다.")
+        print("  --no-init 으로 init() 없이 시도해볼 수 있습니다.")
         return 2
 
     print("=" * 74)
@@ -467,6 +506,9 @@ def main() -> int:
     ap.add_argument("--ref-frame", default="torso_base_link",
                     help="SDK FK 의 reference_frame. 우리 FK 기준과 맞춘다")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--no-init", action="store_true",
+                    help="init() 없이 시도 — forward_kinematics 는 순수 계산이라 "
+                         "로봇 연결 없이도 될 수 있다")
     args = ap.parse_args()
 
     if args.self_test:
@@ -475,7 +517,7 @@ def main() -> int:
     out = args.out or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "robot", "assets",
         f"fk_crosscheck_{socket.gethostname()}.json")
-    return run_live(args.n, args.side, args.ref_frame, out)
+    return run_live(args.n, args.side, args.ref_frame, out, args.no_init)
 
 
 if __name__ == "__main__":

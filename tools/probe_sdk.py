@@ -340,8 +340,11 @@ def probe_live(g: Any) -> dict:
         live["GalbotRobot"] = {"ok": False, "error": "심볼 없음"}
         return live
 
+    print("  → GalbotRobot 핸들 획득 시도...", flush=True)
     robot, ctor = _construct(g, "GalbotRobot")
     live["GalbotRobot_ctor"] = ctor
+    if ctor.get("ok"):
+        print(f"  ✅ {ctor['method']}", flush=True)
     if robot is None:
         live["GalbotRobot"] = {"ok": False,
                                "error": ctor.get("diagnosis", "획득 실패")}
@@ -363,6 +366,10 @@ def probe_live(g: Any) -> dict:
             live[m] = {"ok": False, "error": "메서드 없음"}
             continue
         _assert_readonly(m)
+        # ⚠️ 진행 위치를 호출 **전에** 찍는다. SDK 가 segfault 로 죽으면
+        #    예외가 아니라 SIGSEGV 라 아무 정보도 못 남기므로, 마지막으로
+        #    출력된 줄이 곧 범인이다. (Makefile 이 python -u 로 실행한다)
+        print(f"    → {m}() 호출 중...", flush=True)
         fn = getattr(robot, m)
         r = _try(m, fn)
         if not r["ok"]:
@@ -409,8 +416,11 @@ def probe_live(g: Any) -> dict:
 
     # ── GalbotMotion FK — 우리 자체 FK 와 대조할 근거 ────────────────────────
     if hasattr(g, "GalbotMotion"):
+        print("  → GalbotMotion 핸들 획득 시도...", flush=True)
         motion, mctor = _construct(g, "GalbotMotion")
         live["GalbotMotion_ctor"] = mctor
+        if mctor.get("ok"):
+            print(f"  ✅ {mctor['method']}", flush=True)
         if motion is not None:
             for m in ("get_robot_states", "get_chain_joint_state"):
                 if hasattr(motion, m):

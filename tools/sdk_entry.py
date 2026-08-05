@@ -1,33 +1,36 @@
 """
 GalbotSDK 핸들 획득 — `GalbotRobot` / `GalbotMotion` 을 어떻게 얻는가
 
-답 — 2026-07-31 3090 실측으로 확정
-─────────────────────────────────
+답 — 2026-07-31 3090 실측
+─────────────────────────
 
-    robot  = galbot_sdk.GalbotRobot.get_instance()
-    motion = galbot_sdk.GalbotMotion.get_instance()
+    motion = galbot_sdk.g1.GalbotMotion()      # ← 이것이 실제로 성공한 경로
 
-**네 개 상위 클래스가 전부 싱글톤이다** — GalbotRobot / GalbotMotion /
-GalbotPerception / GalbotNavigation. 넷 다 `py::init<>()` 없이 바인딩돼 있어
-직접 생성하면 이렇게 실패한다:
+**로봇별 서브모듈(`g1` / `s1`)에 구상 클래스가 있다.** 최상위의 동명 클래스는
+`py::init<>()` 없는 베이스라 직접 생성하면 실패한다:
 
     >>> galbot_sdk.GalbotMotion()
     TypeError: galbot_sdk.GalbotMotion: No constructor defined!
 
-`__init__.py` 는 팩토리를 정의하지 않는다. 그 파일이 하는 일은 python 버전과
-아키텍처에 맞는 `.so` 를 골라 동적 로드하고 공개 심볼을 재수출하는 것뿐이다
-(그래서 진입점이 거기 있을 거라는 초기 추정은 빗나갔다 — 싱글톤은 C++ 쪽에 있었다).
+🔴 **`get_instance()` 를 부르지 마십시오.** 후보로 잡히지만 최상위 베이스
+클래스에서 호출하면 **SIGSEGV 로 프로세스가 죽는다** (probe-live 에서 실측:
+"Segmentation fault (core dumped)"). try/except 로 못 잡는다.
+그래서 `_RISKY_AUTOCALL` 에 넣어 기본 차단하고, `allow_risky=True` 를 명시해야만
+시도한다.
+
+정정 이력: 처음엔 `get_instance` 를 "확정 경로" 로 박았는데 틀렸다.
+후보 목록에 있다는 것과 실제로 동작한다는 것은 다르고, 그 차이를 확인하지 않고
+확정이라고 쓴 것이 실수였다.
+
+`__init__.py` 는 팩토리를 정의하지 않는다. python 버전/아키텍처에 맞는 `.so` 를
+골라 동적 로드하고 공개 심볼을 재수출할 뿐이다.
 
 부수 발견
 ─────────
   - `galbot_sdk.pyi` **타입 스텁이 동봉돼 있다.** pybind11 docstring 보다
     풍부한 소스다 — `read_stub()` 참조.
-  - Python 서브모듈 `g1` / `s1` 이 있다 — `probe_submodules()` 참조.
+  - Python 서브모듈 `g1` / `s1` — `probe_submodules()` 참조.
   - `.so` 가 python 3.8~3.14 용으로 7개 동봉돼 있다.
-
-이 모듈은 확정 경로를 먼저 쓰고, SDK 가 바뀌었을 때를 대비해 탐색 사다리를
-fallback 으로 남겨둔다. 사다리는 후보를 **실제로 호출**하므로, 상태를 바꿀 수
-있는 이름은 `_is_autocallable()` 로 차단한다.
 """
 
 from __future__ import annotations
@@ -48,14 +51,28 @@ _AUTOCALL_DENY = ("set_", "move_", "execute_", "start_", "stop_", "enable_",
                   "disable_", "reset_", "clear_", "send_", "shutdown",
                   "destroy", "release", "init", "connect", "open")
 
+# 🔴 **프로세스를 죽이는 것들.** try/except 로 못 잡는다 — segfault 는 예외가
+#    아니라 SIGSEGV 라서 프로세스가 통째로 죽고 출력도 날아간다.
+#
+#    2026-07-31 실측: `make probe-live` 가 여기서 "Segmentation fault (core
+#    dumped)" 로 죽었다. 최상위 GalbotRobot/GalbotMotion 은 py::init<>() 없는
+#    베이스 클래스이고, 인스턴스가 없는 상태에서 `get_instance()` 를 부르면
+#    C++ 쪽에서 null 을 역참조하는 것으로 보인다.
+#
+#    실제 경로는 로봇별 서브모듈이다: `galbot_sdk.g1.GalbotMotion()`.
+#    그래서 아래 이름들은 `allow_risky=True` 를 명시하지 않는 한 호출하지 않는다.
+_RISKY_AUTOCALL = ("get_instance",)
 
-def _is_autocallable(name: str) -> bool:
+
+def _is_autocallable(name: str, allow_risky: bool = False) -> bool:
     """자동 호출해도 안전한 팩토리 이름인가.
 
     허용: `*instance*` 또는 create_/make_/new_/get_ 으로 시작하는 것.
-    거부: 상태를 바꿀 수 있는 접두사 (위 목록).
+    거부: 상태를 바꿀 수 있는 접두사, 그리고 프로세스를 죽이는 것으로 실측된 이름.
     """
     lo = name.lower()
+    if not allow_risky and lo in _RISKY_AUTOCALL:
+        return False
     if any(lo.startswith(d) or lo == d.rstrip("_") for d in _AUTOCALL_DENY):
         return False
     return ("instance" in lo
@@ -182,7 +199,7 @@ class EntryNotFound(RuntimeError):
     """핸들 획득 실패. 다음에 무엇을 봐야 하는지 담아 던진다."""
 
 
-def acquire(sdk: Any, cls_name: str, verbose: bool = True) -> tuple[Any, str]:
+def acquire(sdk: Any, cls_name: str, allow_risky: bool = False) -> tuple[Any, str]:
     """`cls_name` 인스턴스를 얻는다. (객체, 사용한 방법) 반환.
 
     전략을 순서대로 시도하고, 성공한 방법을 문자열로 돌려준다 —
@@ -194,19 +211,25 @@ def acquire(sdk: Any, cls_name: str, verbose: bool = True) -> tuple[Any, str]:
 
     tried: list[str] = []
 
-    # 0) 확정된 경로 — 2026-07-31 3090 실측.
-    #    GalbotRobot / GalbotMotion / GalbotPerception / GalbotNavigation 네 개
-    #    전부 py::init<>() 없이 바인딩된 **싱글톤**이고 `get_instance()` 로 얻는다.
-    #    아래 탐색 사다리는 SDK 가 바뀌었을 때를 위한 fallback 으로 남겨둔다.
-    if hasattr(cls, "get_instance"):
+    # 0) 로봇별 서브모듈 — 2026-07-31 실측으로 **이것이 실제 경로**다.
+    #    `galbot_sdk.g1.GalbotMotion()` 이 성공했다. g1/s1 서브모듈에 로봇별
+    #    구상 클래스가 있고, 최상위의 동명 클래스는 py::init<>() 없는 베이스다.
+    for sub in ("g1", "s1"):
+        if sub not in list_submodules(sdk):
+            continue
         try:
-            obj = cls.get_instance()
-            if isinstance(obj, cls):
-                return obj, f"{cls_name}.get_instance()"
-            tried.append(f"{cls_name}.get_instance()  →  "
-                         f"{type(obj).__name__} 반환 (기대 {cls_name})")
+            mod = __import__(f"{sdk.__name__}.{sub}", fromlist=[sub])
         except Exception as e:
-            tried.append(f"{cls_name}.get_instance()  →  {type(e).__name__}: {e}")
+            tried.append(f"import {sdk.__name__}.{sub}  →  {type(e).__name__}: {e}")
+            continue
+        alt = getattr(mod, cls_name, None)
+        if alt is None:
+            continue
+        try:
+            return alt(), f"{sdk.__name__}.{sub}.{cls_name}()"
+        except Exception as e:
+            tried.append(f"{sdk.__name__}.{sub}.{cls_name}()  →  "
+                         f"{type(e).__name__}: {e}")
 
     # 1) 직접 생성
     try:
@@ -226,8 +249,10 @@ def acquire(sdk: Any, cls_name: str, verbose: bool = True) -> tuple[Any, str]:
     #    Galbot 의 4개 상위 클래스(Robot/Motion/Perception/Navigation)가 전부
     #    싱글톤이고 py::init<>() 없이 바인딩돼 있다.
     for name, sig in find_class_factories(cls):
-        if not _is_autocallable(name):
-            tried.append(f"{cls_name}.{name}()  →  건너뜀 (자동 호출 비허용)")
+        if not _is_autocallable(name, allow_risky):
+            why = ("프로세스를 죽인 이력 — allow_risky 필요"
+                   if name.lower() in _RISKY_AUTOCALL else "자동 호출 비허용")
+            tried.append(f"{cls_name}.{name}()  →  건너뜀 ({why})")
             continue
         try:
             obj = getattr(cls, name)()
@@ -239,7 +264,7 @@ def acquire(sdk: Any, cls_name: str, verbose: bool = True) -> tuple[Any, str]:
 
     # 4) 모듈 최상위 팩토리
     for name, sig in find_factories(sdk, cls_name):
-        if not _is_autocallable(name):
+        if not _is_autocallable(name, allow_risky):
             tried.append(f"{name}()  →  건너뜀 (자동 호출 비허용)")
             continue
         try:
@@ -407,9 +432,19 @@ def self_test() -> int:
     fake.Danger = Danger
     fake.MachineType = None
 
-    obj, how = acquire(fake, "FakeRobot")
-    chk("get_instance 싱글톤을 찾아낸다", isinstance(obj, FakeRobot), how)
+    chk("get_instance 는 기본적으로 차단 (segfault 이력)",
+        not _is_autocallable("get_instance"))
+    chk("  allow_risky=True 면 허용",
+        _is_autocallable("get_instance", allow_risky=True))
+    obj, how = acquire(fake, "FakeRobot", allow_risky=True)
+    chk("allow_risky 로 get_instance 싱글톤을 찾아낸다",
+        isinstance(obj, FakeRobot), how)
     chk("  사용한 방법을 정확히 보고한다", how == "FakeRobot.get_instance()", how)
+    try:
+        acquire(fake, "FakeRobot")
+        chk("기본값에서는 get_instance 를 안 부른다", False, "불렸다")
+    except EntryNotFound:
+        chk("기본값에서는 get_instance 를 안 부른다", True)
 
     # 안전 가드 — init/connect 는 힌트에 걸리지만 자동 호출되면 안 된다
     try:
@@ -419,7 +454,7 @@ def self_test() -> int:
         chk("init/connect 는 자동 호출 안 함", not touched,
             f"touched={touched}" if touched else "")
 
-    for n, want in (("get_instance", True), ("create_robot", True),
+    for n, want in (("create_robot", True),
                     ("make_thing", True), ("new_handle", True),
                     ("init", False), ("connect", False), ("open", False),
                     ("set_joint_commands", False), ("destroy", False),

@@ -121,7 +121,7 @@ probe-check:  ## [모든 기계] SDK 없이 파서/안전차단 검증
 # 이 결과가 통과해야 psi/T_rel 을 데이터셋에 굽는 게 안전하다 (소급 수정 불가).
 fk-check:  ## [회사 Linux + 로봇] 로봇은 움직이지 않는다
 	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; exit 1; }
-	. $(SDK_SETUP) && $(PY) tools/fk_crosscheck.py --n 200
+	. $(SDK_SETUP) && $(PY) -u tools/fk_crosscheck.py --n 200
 
 probe:  ## [회사 Linux] 로봇 불필요
 	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; \
@@ -133,14 +133,16 @@ probe:  ## [회사 Linux] 로봇 불필요
 # GalbotRobot/GalbotMotion 이 "No constructor defined!" 로 생성 안 될 때.
 # pybind11 이 py::init<>() 없이 바인딩한 클래스는 직접 생성이 아니라 어딘가에서
 # 받아오는 것이다. __init__.py 가 Python 소스이므로 거기 진입점이 있을 수 있다.
+# ⚠️ python -u 필수 — 파이프로 넘기면 stdout 이 블록 버퍼링되므로 SDK 가
+#    segfault 로 죽으면 버퍼가 통째로 날아가 빈 파일만 남는다 (실측).
 probe-entry:  ## [회사 Linux] 진입점 조사. 로봇 불필요
 	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; exit 1; }
-	. $(SDK_SETUP) && $(PY) tools/probe_sdk.py --entry 2>&1 | tee sdk_entry_$(MACHINE).txt
+	. $(SDK_SETUP) && $(PY) -u tools/probe_sdk.py --entry 2>&1 | tee sdk_entry_$(MACHINE).txt
 	@echo "→ sdk_entry_$(MACHINE).txt 를 공유해주십시오."
 
 probe-live:  ## [회사 Linux + 로봇] 읽기 전용. 움직이지 않는다
 	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; exit 1; }
-	. $(SDK_SETUP) && $(PY) tools/probe_sdk.py --live --focus \
+	. $(SDK_SETUP) && $(PY) -u tools/probe_sdk.py --live --focus \
 		--out sdk_live_$(MACHINE).json --md sdk_live_$(MACHINE).md
 
 # ⚠️ 실기체가 실제로 움직인다. left_arm_joint4 를 ±2° 로만 흔들지만
@@ -155,7 +157,7 @@ gate1-real:  ## [회사 Linux + 로봇 LAN]
 		echo "  source 하지 않으면 import galbot_sdk 가 실패합니다."; exit 1; }
 	@echo "⚠️  실기체 동작 ($(HOST)). 팔 주변 정리 / e-stop 확인 후 Enter, 중단은 Ctrl-C"
 	@read _
-	. $(SDK_SETUP) && $(PY) tools/measure_loop_rate.py --host $(HOST) --out $(OUT)
+	. $(SDK_SETUP) && $(PY) -u tools/measure_loop_rate.py --host $(HOST) --out $(OUT)
 
 # ── 데이터 분석 ───────────────────────────────────────────────────────────────
 # RoboCOIN(공개 G1 실기체 데이터) 3종: 목 기여도 / psi 분포 / 시야 내 가시성.
