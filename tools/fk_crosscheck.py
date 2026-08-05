@@ -363,35 +363,37 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
         print("\n" + "=" * 74)
         print("init() 이 False 를 반환했습니다. 무엇이 되는지 확인해봅니다.")
         print("=" * 74)
-        # init 실패 원인을 좁힌다 — 읽기 전용 호출만 시도한다
-        for m in ("get_supported_chains", "get_supported_frames",
-                  "get_link_names", "get_chain_joint_state", "get_robot_states"):
+        # ⚠️ init 실패 상태에서 **데이터 호출을 더 하면 segfault 로 죽는다** (실측).
+        #    그래서 init 전에도 안전했던 소수만 부르고 즉시 멈춘다.
+        for m in ("get_supported_chains", "get_supported_frames"):
             if not hasattr(motion, m):
                 continue
             try:
-                print(f"  {m}() → {str(getattr(motion, m)())[:200]}", flush=True)
+                print(f"  motion.{m}() → {str(getattr(motion, m)())[:200]}",
+                      flush=True)
             except Exception as e:
-                print(f"  {m}() → {type(e).__name__}: {str(e)[:160]}", flush=True)
+                print(f"  motion.{m}() → {type(e).__name__}: {str(e)[:160]}",
+                      flush=True)
         try:
             robot, rhow = sdk_entry.acquire(sdk, "GalbotRobot")
-            print(f"\n  GalbotRobot 획득: {rhow}")
-            for m in ("is_running", "get_device_information", "get_joint_group_names"):
-                if hasattr(robot, m):
-                    try:
-                        print(f"  robot.{m}() → {str(getattr(robot, m)())[:200]}")
-                    except Exception as e:
-                        print(f"  robot.{m}() → {type(e).__name__}: {str(e)[:160]}")
+            print(f"\n  GalbotRobot 획득: {rhow}", flush=True)
+            info = robot.get_device_information()
+            print(f"  robot.get_device_information() → {info}", flush=True)
+            empty = all(not str(v).strip() for k, v in (info or {}).items()
+                        if k != "manufacturer")
+            if empty:
+                print("\n  🔴 model/serial/firmware 가 전부 비어 있습니다 —")
+                print("     **로봇이 실제로 연결돼 있지 않습니다.**")
         except Exception as e:
-            print(f"  GalbotRobot 도 획득 실패: {e}")
+            print(f"  GalbotRobot 조회 실패: {e}")
 
         print("\n확인할 것:")
         print("  1. 로봇 전원이 켜져 있고 부팅이 끝났습니까?")
         print("  2. 이 PC 가 로봇 LAN 에 연결돼 있습니까? (ping 으로 확인)")
         print("  3. 다른 프로세스가 이미 SDK 를 점유하고 있지 않습니까?")
         print("     (SDK 는 싱글톤 구조라 중복 연결이 막힐 수 있습니다)")
-        print("  4. `make probe-entry` 출력을 함께 공유해주십시오.")
-        print("\n→ forward_kinematics 는 순수 계산이라 로봇 없이도 될 수 있습니다.")
-        print("  --no-init 으로 init() 없이 시도해볼 수 있습니다.")
+        print("\n⚠️ 여기서 멈춥니다. init 실패 상태에서 get_* 를 더 부르면")
+        print("   segfault 로 프로세스가 죽고 지금까지의 출력도 날아갑니다.")
         return 2
 
     print("=" * 74)
@@ -413,9 +415,17 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
     except Exception as e:
         print(f"  get_chain_joint_state 실패: {e}")
 
+    # 2026-07-31 실측:
+    #   get_supported_chains() → {'torso','leg','head','left_arm','right_arm'}
+    #   get_supported_frames() → {'map','world','base_link'}   ← torso_base_link 없음
     chains = sorted(motion.get_supported_chains())
     chain = next((c for c in chains if side in c.lower()), chains[0] if chains else side)
     print(f"\n  사용할 chain: '{chain}'   reference_frame: '{ref_frame}'")
+    if ref_frame != "torso_base_link":
+        print("\n  ℹ️ 우리 FK 는 torso_base_link 기준인데 SDK 는 그 프레임을 지원하지")
+        print("     않습니다 (지원: map/world/base_link). 그래서 **절대 포즈는 다리")
+        print("     5-DoF 만큼 어긋나는 것이 정상**입니다. 판정은 body-relative")
+        print("     (root 차이에 불변) 로 합니다 — 그게 맞으면 URDF 는 옳습니다.")
 
     arm = G1Arm(side)
     rng = np.random.default_rng(0)
@@ -503,8 +513,11 @@ def main() -> int:
     ap.add_argument("--self-test", action="store_true", help="SDK 없이 로직 검증")
     ap.add_argument("--n", type=int, default=200, help="표본 수")
     ap.add_argument("--side", default="left", choices=["left", "right"])
-    ap.add_argument("--ref-frame", default="torso_base_link",
-                    help="SDK FK 의 reference_frame. 우리 FK 기준과 맞춘다")
+    ap.add_argument("--ref-frame", default="base_link",
+                    help="SDK FK 의 reference_frame. 2026-07-31 실측 결과 SDK 가 "
+                         "지원하는 프레임은 {map, world, base_link} 뿐이고 "
+                         "torso_base_link 는 **없다**. 그래서 base_link 로 받고 "
+                         "body-relative 대조(root 차이에 불변)로 판정한다")
     ap.add_argument("--out", default=None)
     ap.add_argument("--no-init", action="store_true",
                     help="init() 없이 시도 — forward_kinematics 는 순수 계산이라 "

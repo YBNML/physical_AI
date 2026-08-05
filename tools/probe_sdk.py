@@ -351,6 +351,47 @@ def probe_live(g: Any) -> dict:
         print("\n" + ctor.get("diagnosis", "GalbotRobot 획득 실패"))
         return live
 
+    # ⚠️ **init() 없이 데이터 메서드를 부르면 segfault 다.**
+    #    2026-07-31 실측: 획득 직후 get_joint_names() 를 부르자
+    #    "Segmentation fault (core dumped)". SDK 가 초기화되지 않은 내부 상태를
+    #    역참조하는 것으로 보인다. 예외가 아니라 SIGSEGV 라 못 잡는다.
+    #    따라서 init() 이 False 면 **여기서 멈춘다.** 진행하면 프로세스가 죽고
+    #    지금까지 모은 정보까지 같이 날아간다.
+    print("  → robot.init() 호출 중...", flush=True)
+    try:
+        inited = bool(robot.init(set()))
+    except Exception as e:
+        inited = False
+        print(f"  init() 예외: {type(e).__name__}: {e}", flush=True)
+    print(f"  init() → {inited}", flush=True)
+    live["init"] = {"ok": inited}
+
+    if not inited:
+        info = {}
+        # get_device_information 은 init 전에도 안전했다 (실측)
+        try:
+            info = robot.get_device_information()
+            print(f"  get_device_information() → {info}", flush=True)
+            live["device_information"] = info
+        except Exception as e:
+            print(f"  get_device_information() → {type(e).__name__}: {e}")
+        empty = all(not str(v).strip() for k, v in (info or {}).items()
+                    if k != "manufacturer")
+        print("\n" + "=" * 72)
+        print("🔴 init() 이 False 입니다. 여기서 중단합니다.")
+        print("=" * 72)
+        if empty:
+            print("  device 정보(model/serial/firmware)가 전부 비어 있습니다.")
+            print("  → **로봇이 실제로 연결돼 있지 않습니다.** SDK 프로세스만 살아 있고")
+            print("     반대편에 기체가 없는 상태입니다.")
+        print("\n  확인할 것:")
+        print("   1. 로봇 전원이 켜져 있고 부팅이 끝났는가")
+        print("   2. 이 PC 가 로봇 LAN 에 있는가 (ping 으로 확인)")
+        print("   3. 다른 프로세스가 SDK 를 점유하고 있지 않은가 (싱글톤 구조)")
+        print("\n  ⚠️ 이 상태에서 get_* 를 부르면 segfault 로 프로세스가 죽습니다.")
+        print("     그래서 더 진행하지 않습니다.")
+        return live
+
     READ_CALLS = [
         "get_joint_names",          # ★ 관절 순서/개수 확정 — 21 vs 23 논쟁 종결
         "get_joint_group_names",    # ★ G1JointGroup 실제 값

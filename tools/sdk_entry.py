@@ -477,67 +477,69 @@ def self_test() -> int:
     return 0
 
 
-def entry_report(sdk: Any) -> str:
+def entry_report(sdk: Any, emit=None) -> str:
     """진입점 조사 보고서 — `probe_sdk.py --entry` 가 출력한다.
 
-    후보를 나열만 하지 않고 **실제로 호출해본다.** 나열만 하면 사람이 다시
-    확인해야 하고, 그 왕복이 회사 시간을 쓴다.
+    ⚠️ **즉시 출력한다.** 초기 구현은 문자열을 모아 마지막에 한 번 출력했는데,
+    SDK 가 중간에 segfault 로 죽으면 아무것도 안 남는다 (실측: sdk_entry_*.txt 가
+    두 번 연속 빈 파일이었다). python -u 를 붙여도 **출력 자체가 없으면 소용없다.**
+    그래서 emit 으로 줄 단위 즉시 출력한다.
+
+    ⚠️ **초기화되지 않은 핸들에 데이터 메서드를 부르지 않는다.** init() 전에
+    get_joint_names() 를 부르면 segfault 다 (실측). 여기서는 획득까지만 한다.
     """
+    emit = emit or (lambda s: print(s, flush=True))
     L: list[str] = []
-    L.append("=" * 78)
-    L.append("진입점 조사 — GalbotRobot / GalbotMotion 을 어떻게 얻는가")
-    L.append("=" * 78)
-    L.append(f"\n패키지: {package_dir(sdk)}")
-    L.append(f"서브모듈: {list_submodules(sdk) or '(없음)'}")
+
+    def out(line: str) -> None:
+        L.append(line)
+        emit(line)
+    out("=" * 78)
+    out("진입점 조사 — GalbotRobot / GalbotMotion 을 어떻게 얻는가")
+    out("=" * 78)
+    out(f"패키지: {package_dir(sdk)}")
+    out(f"서브모듈: {list_submodules(sdk) or '(없음)'}")
 
     files = list_package_files(sdk)
-    L.append(f"\n패키지 파일 {len(files)}개:")
-    L += [f"  {f}" for f in files[:60]]
+    out(f"\n패키지 파일 {len(files)}개:")
+    for f in files[:60]:
+        out(f"  {f}")
 
-    L.append("\n" + "=" * 78)
-    L.append("핸들 획득 — 후보를 실제로 호출해본다")
-    L.append("=" * 78)
+    out("\n" + "=" * 78)
+    out("핸들 획득 (데이터 메서드는 부르지 않는다 — init 전이라 segfault 난다)")
+    out("=" * 78)
     for cname in ("GalbotRobot", "GalbotMotion", "GalbotPerception",
                   "GalbotNavigation"):
         cls = getattr(sdk, cname, None)
         if cls is None:
             continue
-        L.append(f"\n── {cname}")
+        out(f"\n── {cname}")
         cf = find_class_factories(cls)
-        L.append(f"  클래스 팩토리 후보: {[n for n, _ in cf] or '(없음)'}")
+        out(f"  클래스 팩토리 후보: {[n for n, _ in cf] or '(없음)'}")
         for n, sig in cf:
-            L.append(f"    {n}: {sig or '(docstring 없음)'}")
+            out(f"    {n}: {sig or '(docstring 없음)'}")
         try:
             obj, how = acquire(sdk, cname)
-            L.append(f"  ✅ 획득 성공 — {how}")
-            L.append(f"     type={type(obj).__name__}")
-            for m in ("is_running", "get_joint_group_names", "get_frame_names",
-                      "get_supported_chains"):
-                if hasattr(obj, m):
-                    try:
-                        L.append(f"     {m}() → {str(getattr(obj, m)())[:160]}")
-                    except Exception as e:
-                        L.append(f"     {m}() → {type(e).__name__}: {str(e)[:120]}")
+            out(f"  ✅ 획득 성공 — {how}   type={type(obj).__name__}")
         except EntryNotFound as e:
-            L.append("  ❌ 획득 실패")
-            L += [f"     {ln}" for ln in str(e).splitlines()[:14]]
+            out("  ❌ 획득 실패")
+            for ln in str(e).splitlines()[:14]:
+                out(f"     {ln}")
 
-    L.append("\n" + "=" * 78)
-    L.append("서브모듈 내용")
-    L.append("=" * 78)
-    L.append(probe_submodules(sdk))
+    out("\n" + "=" * 78)
+    out("서브모듈 내용")
+    out("=" * 78)
+    for ln in probe_submodules(sdk).splitlines():
+        out(ln)
 
-    L.append("\n" + "=" * 78)
-    L.append("galbot_sdk.pyi 타입 스텁 — 관심 심볼 주변")
-    L.append("=" * 78)
-    L.append(read_stub(sdk, grep=["get_instance", "class GalbotRobot",
-                                  "class GalbotMotion", "def init",
-                                  "class SingoriXTarget", "class TargetConfig"]))
-
-    L.append("\n" + "=" * 78)
-    L.append("__init__.py 원문")
-    L.append("=" * 78)
-    L.append(read_init_source(sdk))
+    out("\n" + "=" * 78)
+    out("galbot_sdk.pyi 타입 스텁 — 관심 심볼 주변")
+    out("=" * 78)
+    for ln in read_stub(sdk, grep=["get_instance", "class GalbotRobot",
+                                   "class GalbotMotion", "def init",
+                                   "class SingoriXTarget",
+                                   "class TargetConfig"]).splitlines():
+        out(ln)
     return "\n".join(L)
 
 
