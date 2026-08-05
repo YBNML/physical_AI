@@ -392,31 +392,75 @@ def probe_live(g: Any) -> dict:
         print("     그래서 더 진행하지 않습니다.")
         return live
 
-    READ_CALLS = [
-        "get_joint_names",          # ★ 관절 순서/개수 확정 — 21 vs 23 논쟁 종결
-        "get_joint_group_names",    # ★ G1JointGroup 실제 값
-        "get_joint_positions",
-        "get_joint_states",         # ★ effort/current 필드가 실제로 채워지는가
-        "get_gripper_state",        # ★ 엔드이펙터 좌우 구성 단서
-        "get_dexterous_hand_state",
-        "get_suction_cup_state",
-        "get_robot_states",
-    ]
-    for m in READ_CALLS:
+    # ⚠️ **인자를 제대로 넘긴다.** 초기 구현은 전부 무인자로 불러서
+    #    get_joint_positions/get_joint_states/get_gripper_state 등이 죄다
+    #    "incompatible function arguments" TypeError 로 실패했다 (온보드 실측).
+    #    시그니처를 이미 뽑아놓고도 probe 에 반영하지 않은 것이 원인이었다.
+    #
+    #    실물 시그니처 (probe 로 확인):
+    #      get_joint_names(only_active_joint=True, joint_groups=[]) -> [str]
+    #      get_joint_group_names() -> [str]
+    #      get_joint_positions(joint_groups, joint_names=[]) -> [float]   ← 필수 인자
+    #      get_joint_states(joint_group_vec, joint_names_vec=[]) -> [JointState]
+    #      get_gripper_state(end_effector: str) -> GripperState
+    #      get_dexterous_hand_state(end_effector: str) -> tuple
+    #      get_suction_cup_state(end_effector: str) -> SuctionCupState
+    print("    → get_joint_group_names() 호출 중...", flush=True)
+    groups: list[str] = []
+    r = _try("get_joint_group_names", robot.get_joint_group_names)
+    live["get_joint_group_names"] = r
+    if r["ok"]:
+        try:
+            groups = [str(x) for x in robot.get_joint_group_names()]
+        except Exception:
+            groups = []
+    print(f"       그룹 {len(groups)}개: {groups}", flush=True)
+
+    print("    → get_joint_names() 호출 중...", flush=True)
+    live["get_joint_names"] = _try("get_joint_names", robot.get_joint_names)
+
+    # 그룹별 관절 이름 — 우리 인덱싱이 이름 기반이라 이 매핑이 핵심이다
+    per_group: dict = {}
+    for gname in groups:
+        print(f"    → get_joint_names(joint_groups=['{gname}']) ...", flush=True)
+        try:
+            per_group[gname] = [str(x) for x in robot.get_joint_names(
+                only_active_joint=True, joint_groups=[gname])]
+        except Exception as e:
+            per_group[gname] = f"{type(e).__name__}: {e}"
+    live["joint_names_by_group"] = per_group
+
+    # 위치/상태 — joint_groups 가 필수 인자다
+    if groups:
+        print(f"    → get_joint_positions({groups}) ...", flush=True)
+        live["get_joint_positions"] = _try(
+            "get_joint_positions", robot.get_joint_positions, groups)
+        print(f"    → get_joint_states({groups}) ...", flush=True)
+        live["get_joint_states"] = _try(
+            "get_joint_states", robot.get_joint_states, groups)
+
+    # 엔드이펙터 — 이름을 모르므로 gripper 계열 그룹명을 후보로 쓴다.
+    # ★ 좌우 구성(그리퍼 vs 석션)을 여기서 가른다.
+    ee_names = [gname for gname in groups
+                if any(k in gname.lower() for k in ("gripper", "hand", "suction",
+                                                     "effector", "ee"))]
+    live["end_effector_candidates"] = ee_names
+    for ee in ee_names:
+        for m in ("get_gripper_state", "get_dexterous_hand_state",
+                  "get_suction_cup_state"):
+            if not hasattr(robot, m):
+                continue
+            _assert_readonly(m)
+            print(f"    → {m}('{ee}') ...", flush=True)
+            live[f"{m}[{ee}]"] = _try(m, getattr(robot, m), ee)
+
+    # 프레임 이름 — fk_crosscheck 의 reference_frame 후보
+    for m in ("get_frame_names", "get_device_information", "get_bms_information"):
         if not hasattr(robot, m):
-            live[m] = {"ok": False, "error": "메서드 없음"}
             continue
         _assert_readonly(m)
-        # ⚠️ 진행 위치를 호출 **전에** 찍는다. SDK 가 segfault 로 죽으면
-        #    예외가 아니라 SIGSEGV 라 아무 정보도 못 남기므로, 마지막으로
-        #    출력된 줄이 곧 범인이다. (Makefile 이 python -u 로 실행한다)
-        print(f"    → {m}() 호출 중...", flush=True)
-        fn = getattr(robot, m)
-        r = _try(m, fn)
-        if not r["ok"]:
-            # 인자가 필요한 경우가 대부분 — docstring 을 같이 실어 준다
-            r["signature_doc"] = parse_pybind_doc(getattr(fn, "__doc__", None))
-        live[m] = r
+        print(f"    → {m}() ...", flush=True)
+        live[m] = _try(m, getattr(robot, m))
 
     # ── 손목 F/T ★★ 이게 이 probe 의 가장 큰 수확 ────────────────────────────
     if hasattr(robot, "get_force_sensor_data"):
@@ -462,6 +506,25 @@ def probe_live(g: Any) -> dict:
         live["GalbotMotion_ctor"] = mctor
         if mctor.get("ok"):
             print(f"  ✅ {mctor['method']}", flush=True)
+        if motion is not None:
+            # ⚠️ Motion 도 init() 이 필요하다. 안 하면 get_chain_joint_state() 가
+            #    빈 dict 를 돌려준다 (온보드 실측). robot.init() 과 별개다.
+            print("  → motion.init() 호출 중...", flush=True)
+            try:
+                mi = bool(motion.init())
+            except Exception as e:
+                mi = False
+                print(f"     예외: {type(e).__name__}: {e}", flush=True)
+            print(f"  motion.init() → {mi}", flush=True)
+            live["motion_init"] = {"ok": mi}
+            if not mi:
+                print("  ⚠️ motion.init() 실패 — 아래 Motion 조회는 비어 있을 수 있습니다.")
+            for m in ("get_supported_chains", "get_supported_frames",
+                      "get_supported_ee_frames", "get_link_names"):
+                if hasattr(motion, m):
+                    _assert_readonly(m)
+                    print(f"    → Motion.{m}() ...", flush=True)
+                    live[f"Motion.{m}"] = _try(m, getattr(motion, m))
         if motion is not None:
             for m in ("get_robot_states", "get_chain_joint_state"):
                 if hasattr(motion, m):
@@ -733,7 +796,9 @@ def main() -> int:
     print("GalbotSDK 표면 조사")
     print("=" * 78)
     if args.entry:
-        print(sdk_entry.entry_report(g))
+        # entry_report 가 줄 단위로 즉시 출력한다. 반환값을 또 print 하면
+        # 전체가 두 번 찍힌다 (온보드에서 실제로 그랬다).
+        sdk_entry.entry_report(g)
         return 0
 
     print(f"  모듈 : {getattr(g, '__file__', '?')}")
