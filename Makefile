@@ -40,11 +40,40 @@ DATA       ?= data/robocoin
 OUT        ?= gate1_results_$(HOST)_$(MACHINE).json
 
 # GalbotSDK 는 setup.sh 를 source 해야 import 된다 (LD_LIBRARY_PATH/PYTHONPATH).
-# 경로가 다르면:  make SDK_SETUP=/실제/경로/setup.sh probe
-SDK_SETUP  ?= /opt/galbot/galbot_sdk/linux-x86_64-gcc940/setup.sh
+#
+# 경로를 **자동 탐지**한다. 하드코딩하면 안 되는 이유: 로봇 온보드는 aarch64 이고
+# 3090 은 x86_64 라 디렉터리 이름이 다르다 (linux-aarch64-* vs linux-x86_64-*).
+# 실제로 온보드에서 "SDK setup.sh 없음" 으로 막혔다.
+#   1) 이 기계 아키텍처에 맞는 것
+#   2) 없으면 아무거나 (교차 컴파일 배치 등)
+#   3) 그것도 없으면 예상 경로 (에러 메시지에 쓰인다)
+# 강제 지정:  make SDK_SETUP=/실제/경로/setup.sh probe
+UNAME_M    := $(shell uname -m)
+SDK_ARCH   := $(wildcard /opt/galbot/galbot_sdk/linux-$(UNAME_M)-*/setup.sh)
+SDK_ANY    := $(wildcard /opt/galbot/galbot_sdk/*/setup.sh)
+SDK_SETUP  ?= $(firstword $(SDK_ARCH) $(SDK_ANY) \
+                /opt/galbot/galbot_sdk/linux-$(UNAME_M)-UNKNOWN/setup.sh)
+
+# SDK 경로 확인이 필요한 타겟들이 공통으로 부르는 검사.
+# 못 찾으면 실제로 무엇이 있는지 보여준다 — "없음" 만 찍고 끝내면 다음 수가 없다.
+define REQUIRE_SDK
+	@test -f "$(SDK_SETUP)" || { \
+		echo "SDK setup.sh 를 찾지 못했습니다: $(SDK_SETUP)"; \
+		echo "  아키텍처: $(UNAME_M)"; \
+		echo ""; \
+		echo "  /opt/galbot 아래에 실제로 있는 것:"; \
+		ls -1 /opt/galbot/galbot_sdk/ 2>/dev/null | sed 's/^/    /' \
+			|| echo "    (/opt/galbot/galbot_sdk 자체가 없습니다)"; \
+		echo ""; \
+		echo "  전체 검색:"; \
+		echo "    find / -name setup.sh -path '*galbot*' 2>/dev/null"; \
+		echo ""; \
+		echo "  찾으면:  make SDK_SETUP=/실제/경로/setup.sh $@"; \
+		exit 1; }
+endef
 
 .DEFAULT_GOAL := help
-.PHONY: help setup check test gate1 gate1-real probe probe-check probe-live probe-entry fk-check analysis inspect e0-check e0-smoke bench lock clean
+.PHONY: help setup check test gate1 gate1-real probe probe-check probe-check-min sdk-where probe-live probe-entry fk-check analysis inspect e0-check e0-smoke bench lock clean
 
 # ─────────────────────────────────────────────────────────────────────────────
 help:  ## [모든 기계]
@@ -70,6 +99,7 @@ help:  ## [모든 기계]
 	@echo "    make probe-live   [회사 Linux + 로봇]  읽기 전용 실물 조회 (안 움직임)"
 	@echo "    make fk-check     [회사 Linux + 로봇]  SDK FK 와 우리 FK 대조 (안 움직임)"
 	@echo "    make probe-entry  [회사 Linux]  ⚠️ 핸들 획득이 막혔을 때 진입점 조사"
+	@echo "    make sdk-where    [모든 기계]  SDK 경로/파이썬/의존성 확인 (새 기계 1순위)"
 	@echo ""
 	@echo "  실측"
 	@echo "    make gate1-real   [회사 Linux + 로봇]  ⚠️ 실기체가 움직인다"
@@ -111,22 +141,41 @@ gate1:  ## [모든 기계]
 # probe      = 정적 조사만. 로봇에 연결하지 않고 아무것도 움직이지 않는다.
 # probe-live = 읽기 전용 실물 조회. set_/move_/execute_ 는 코드에서 하드 차단됨.
 #              손목 F/T 실값, 관절 이름 순서, 카메라 extrinsic 을 여기서 한 번에 얻는다.
-probe-check:  ## [모든 기계] SDK 없이 파서/안전차단 검증
+# SDK 위치와 이 기계의 실행 환경을 보여준다. 새 기계(특히 로봇 온보드)에서
+# 제일 먼저 돌릴 것 — 아무것도 설치하지 않고 진단만 한다.
+sdk-where:  ## [모든 기계] SDK 경로/파이썬/의존성 확인
+	@echo "아키텍처   : $(UNAME_M)"
+	@echo "python     : $(PY)"
+	@$(PY) -c "import sys;print('  버전     :',sys.version.split()[0])"
+	@$(PY) -c "import numpy;print('  numpy    :',numpy.__version__)" 2>/dev/null \
+		|| echo "  numpy    : 없음 (fk-check 만 필요. probe/gate1 은 stdlib 만 씀)"
+	@echo "SDK_SETUP  : $(SDK_SETUP)"
+	@test -f "$(SDK_SETUP)" && echo "  → 있음 ✅" || echo "  → 없음 ❌"
+	@echo ""
+	@echo "/opt/galbot/galbot_sdk 내용:"
+	@ls -1 /opt/galbot/galbot_sdk/ 2>/dev/null | sed 's/^/  /' || echo "  (없음)"
+	@echo ""
+	@. $(SDK_SETUP) 2>/dev/null && $(PY) -c \
+		"import galbot_sdk;print('galbot_sdk import ✅',galbot_sdk.__file__)" \
+		2>/dev/null || echo "galbot_sdk import ❌ (SDK_SETUP 을 확인하십시오)"
+
+# 온보드처럼 conda/numpy 가 없는 기계용 — stdlib 만 쓰는 도구들만 검증한다.
+probe-check-min:  ## [모든 기계] numpy 없이 되는 자체검증만
 	$(PY) tools/probe_sdk.py --self-test
 	$(PY) tools/sdk_entry.py
+
+probe-check: probe-check-min  ## [모든 기계] SDK 없이 파서/안전차단 검증
 	$(PY) tools/fk_crosscheck.py --self-test
 
 # SDK FK 와 우리 FK 대조 — URDF 자기일관성을 벗어나는 첫 외부 검증.
 # forward_kinematics 는 joint_state 를 인자로 받으므로 로봇을 움직이지 않는다.
 # 이 결과가 통과해야 psi/T_rel 을 데이터셋에 굽는 게 안전하다 (소급 수정 불가).
 fk-check:  ## [회사 Linux + 로봇] 로봇은 움직이지 않는다
-	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; exit 1; }
+	$(REQUIRE_SDK)
 	. $(SDK_SETUP) && $(PY) -u tools/fk_crosscheck.py --n 200
 
 probe:  ## [회사 Linux] 로봇 불필요
-	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; \
-		echo "  make SDK_SETUP=/실제/경로/setup.sh probe"; \
-		echo "  찾기:  find /opt -maxdepth 6 -type d -name galbot_sdk"; exit 1; }
+	$(REQUIRE_SDK)
 	. $(SDK_SETUP) && $(PY) tools/probe_sdk.py --focus \
 		--out sdk_surface_$(MACHINE).json --md sdk_surface_$(MACHINE).md
 
@@ -136,12 +185,12 @@ probe:  ## [회사 Linux] 로봇 불필요
 # ⚠️ python -u 필수 — 파이프로 넘기면 stdout 이 블록 버퍼링되므로 SDK 가
 #    segfault 로 죽으면 버퍼가 통째로 날아가 빈 파일만 남는다 (실측).
 probe-entry:  ## [회사 Linux] 진입점 조사. 로봇 불필요
-	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; exit 1; }
+	$(REQUIRE_SDK)
 	. $(SDK_SETUP) && $(PY) -u tools/probe_sdk.py --entry 2>&1 | tee sdk_entry_$(MACHINE).txt
 	@echo "→ sdk_entry_$(MACHINE).txt 를 공유해주십시오."
 
 probe-live:  ## [회사 Linux + 로봇] 읽기 전용. 움직이지 않는다
-	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; exit 1; }
+	$(REQUIRE_SDK)
 	. $(SDK_SETUP) && $(PY) -u tools/probe_sdk.py --live --focus \
 		--out sdk_live_$(MACHINE).json --md sdk_live_$(MACHINE).md
 
@@ -153,8 +202,7 @@ probe-live:  ## [회사 Linux + 로봇] 읽기 전용. 움직이지 않는다
 gate1-real:  ## [회사 Linux + 로봇 LAN]
 	@test "$(HOST)" != "unspecified" || { \
 		echo "HOST 를 지정할 것: make gate1-real HOST=external  (또는 HOST=onboard)"; exit 1; }
-	@test -f "$(SDK_SETUP)" || { echo "SDK setup.sh 없음: $(SDK_SETUP)"; \
-		echo "  source 하지 않으면 import galbot_sdk 가 실패합니다."; exit 1; }
+	$(REQUIRE_SDK)
 	@echo "⚠️  실기체 동작 ($(HOST)). 팔 주변 정리 / e-stop 확인 후 Enter, 중단은 Ctrl-C"
 	@read _
 	. $(SDK_SETUP) && $(PY) -u tools/measure_loop_rate.py --host $(HOST) --out $(OUT)
