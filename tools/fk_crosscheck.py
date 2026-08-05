@@ -343,6 +343,25 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
               "(bash 필요)", file=sys.stderr)
         return 2
 
+    # ⚠️ **GalbotRobot 을 먼저 init 해야 한다.**
+    #    2026-07-31 실측 대조: probe-live 는 robot.init() 을 먼저 했고
+    #    get_chain_joint_state() 가 실값을 줬다. fk_crosscheck 는 Motion 만
+    #    만들었고 15초 내내 {} 였으며 forward_kinematics 가 DATA_FETCH_FAILED 로
+    #    실패했다. 두 실행의 유일한 차이가 이것이다 — 메시지 버스 구독이
+    #    robot 핸들 쪽에 있는 것으로 보인다.
+    try:
+        robot, rhow = sdk_entry.acquire(sdk, "GalbotRobot")
+        print(f"GalbotRobot 획득: {rhow}", flush=True)
+        print("GalbotRobot.init() 호출 중...", flush=True)
+        rok = bool(robot.init(set()))
+        print(f"GalbotRobot.init() → {rok}", flush=True)
+        if not rok:
+            print("⚠️ robot.init() 이 False 입니다. Motion 이 관절 상태를 못 받을 수 "
+                  "있습니다.", file=sys.stderr)
+    except Exception as e:
+        print(f"⚠️ GalbotRobot 준비 실패: {type(e).__name__}: {e}", file=sys.stderr)
+        print("   Motion 이 관절 상태를 못 받을 수 있습니다.", file=sys.stderr)
+
     # ⚠️ GalbotMotion() 직접 생성은 "No constructor defined!" 로 실패한다 (실측).
     #    pybind11 이 py::init<>() 없이 바인딩했으므로 어딘가에서 받아와야 한다.
     try:
@@ -451,9 +470,7 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
         print("     5-DoF 만큼 어긋나는 것이 정상**입니다. 판정은 body-relative")
         print("     (root 차이에 불변) 로 합니다 — 그게 맞으면 URDF 는 옳습니다.")
 
-    arm = G1Arm(side)
     rng = np.random.default_rng(0)
-    q_lo, q_hi = arm.limits   # property (괄호 없음)
 
     # ⚠️ SDK 가 아는 링크만 시도한다. 우리 URDF 의 gripper 링크 이름들은
     #    SDK 모델에 아예 없어서 INVALID_INPUT 이 났다 (실측). 존재하지 않는
@@ -485,6 +502,17 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
         if sdk_links and frame not in sdk_links:
             results[frame] = {"error": "SDK 링크 목록에 없음"}
             continue
+        # ⚠️ **우리 FK 도 같은 링크를 tip 으로 잡는다.** tip 서명표로 사후
+        #    보정하는 것보다 애초에 같은 지점을 비교하는 게 깨끗하다.
+        #    SDK 모델에는 그리퍼가 없으므로(링크 36개 중 우리 후보는 mount 하나뿐)
+        #    실제로 비교 가능한 지점은 arm 끝단이다.
+        try:
+            arm = G1Arm(side, tip=frame)
+        except Exception as e:
+            results[frame] = {"error": f"우리 URDF 에 {frame} 없음: {e}"}
+            print(f"  {frame}: 우리 URDF 에 없음 — 건너뜀")
+            continue
+        q_lo, q_hi = arm.limits
         ours, theirs = [], []
         bad = 0
         for _ in range(n):
