@@ -35,10 +35,24 @@ URDF 자체가 실기체와 다르면 7/7 통과해도 아무것도 보증하지
     body ✅ · spat ✅ → 프레임까지 동일 (또는 사소한 상수 오프셋)
     body ✅ · spat ❌ → root 프레임만 다름. 학습에 치명적이지 않음
     body ❌ · spat ✅ → tip 프레임만 다름. **상수 오차라 학습이 흡수해 조용히 틀림**
-    body ❌ · spat ❌ → URDF 자체가 실기체와 다름. 링크 길이·관절 축 문제
+    body ❌ · spat ❌ → 프레임 규약으로 설명 안 됨 → 아래 4가지를 가려야 한다
 
 ⚠️ 상대변환을 **하나만** 재면 tip 문제를 "URDF 가 틀렸다"로 오진한다.
    이 스크립트의 자체 테스트가 실제로 그 오진을 잡아냈다.
+
+⚠️ **body ❌ 를 곧바로 "URDF 가 틀렸다" 로 읽으면 안 된다.** 원인이 최소 넷이고
+   셋은 우리 입력 문제다:
+     (a) SDK 가 joint_state 를 무시하고 현재 자세만 쓴다
+     (b) SDK 가 관절값을 자기 한계로 clamp 한다
+     (c) chain 내 관절 순서가 우리 URDF 와 다르다
+     (d) 진짜로 링크 길이·관절 축이 다르다
+   `preflight()` 가 (a)(b) 를 배제하고, body-rel 의 **median vs max** 가
+   (c)(d) 와 "일부 샘플만" 을 가른다:
+     median 부터 크다        → 계통 오차 → (c) 또는 (d) → 진짜 문제
+     median 은 작고 max 만 크다 → 일부 샘플 → 한계 밖 입력 의심 → --sampling local
+
+   기본 샘플링이 `local`(현재 자세 주변)인 이유가 이것이다. 전 범위 무작위는
+   SDK 한계를 넘어 (b) 를 유발한다.
 
 출력
 ────
@@ -182,13 +196,18 @@ def compare(ours: list[np.ndarray], theirs: list[np.ndarray]) -> dict:
         spat_r.append(math.degrees(dr))
 
     def stat(v):
-        return {"max": float(np.max(v)), "median": float(np.median(v)),
-                "mean": float(np.mean(v))} if len(v) else {}
+        if not len(v):
+            return {}
+        a = np.asarray(v, dtype=float)
+        return {"max": float(a.max()), "p95": float(np.percentile(a, 95)),
+                "median": float(np.median(a)), "mean": float(a.mean()),
+                "argmax": int(a.argmax())}
 
     return {"abs_pos_mm": stat(abs_p), "abs_rot_deg": stat(abs_r),
             "body_rel_pos_mm": stat(body_p), "body_rel_rot_deg": stat(body_r),
             "spat_rel_pos_mm": stat(spat_p), "spat_rel_rot_deg": stat(spat_r),
-            "n": len(ours)}
+            "n": len(ours),
+            "_body_p": [float(x) for x in body_p]}
 
 
 def interpret(c: dict) -> tuple[bool, str, list[str]]:
@@ -211,13 +230,32 @@ def interpret(c: dict) -> tuple[bool, str, list[str]]:
     abs_ok = ap <= REL_POS_TOL_MM and ar <= REL_ROT_TOL_DEG
 
     if not body_ok and not spat_ok:
+        # ⚠️ 여기서 "URDF 가 틀렸다" 로 단정했던 것은 과했다.
+        #    tip 을 like-for-like 로 맞춘 뒤에도 body-rel 이 어긋나는 원인은
+        #    최소 넷이고, 그중 셋은 우리 입력 문제다:
+        #      (a) SDK 가 joint_state 를 무시  (b) SDK 가 관절값을 clamp
+        #      (c) chain 내 관절 순서가 다름   (d) 진짜 링크 길이/축 불일치
+        #    preflight 가 (a)(b) 를 배제하고, median/max 분포가 (c)(d) 를 가른다:
+        #      median 이 크다  → 계통 오차 → (c) 또는 (d)
+        #      median 은 작고 max 만 크다 → 일부 샘플만 → 한계 밖 입력 의심
+        bp = c["body_rel_pos_mm"]
+        systematic = bp.get("median", 0.0) > REL_POS_TOL_MM
         notes.append(
-            f"🔴 두 상대변환이 모두 어긋납니다 "
-            f"(body {c['body_rel_pos_mm']['max']:.2f}mm / "
-            f"spatial {c['spat_rel_pos_mm']['max']:.2f}mm). "
-            "프레임 규약 차이로는 설명되지 않습니다 — **URDF 자체가 실기체와 다릅니다** "
-            "(링크 길이 또는 관절 축). psi/T_rel 을 데이터셋에 굽지 마십시오.")
-        return False, "FAIL — URDF 가 실기체와 불일치", notes
+            f"🔴 body-relative 가 어긋납니다 "
+            f"(median {bp.get('median', float('nan')):.2f} / "
+            f"p95 {bp.get('p95', float('nan')):.2f} / "
+            f"max {bp.get('max', float('nan')):.2f} mm). "
+            "tip 을 같은 링크로 맞췄으므로 프레임 규약으로는 설명되지 않습니다.")
+        if systematic:
+            notes.append(
+                "   median 부터 크므로 **계통 오차**입니다 — 링크 길이·관절 축이 "
+                "다르거나 chain 내 관절 순서가 다릅니다. psi/T_rel 을 굽지 마십시오.")
+            return False, "FAIL — 계통적 기구학 불일치", notes
+        notes.append(
+            "   median 은 작고 일부 샘플만 큽니다 → 전 범위 샘플링이 SDK 의 관절 "
+            "한계를 넘었을 가능성이 높습니다. `--sampling local` 로 현재 자세 "
+            "주변만 흔들어 재시도하십시오.")
+        return False, "FAIL (조건부) — 일부 샘플만 불일치", notes
 
     if abs_ok:
         notes.append("✅ 절대 포즈까지 일치 → tip·기준 프레임 모두 동일합니다.")
@@ -333,8 +371,93 @@ def self_test() -> int:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _sdk_fk(motion, frame: str, ref: str, chain: str, q) -> tuple:
+    """SDK FK 한 번. (status_name, pose_list|None)."""
+    st, pose = motion.forward_kinematics(
+        frame, reference_frame=ref, joint_state={chain: [float(x) for x in q]})
+    return getattr(st, "name", str(st)), pose
+
+
+def preflight(motion, frame: str, ref: str, chain: str, q0, arm) -> dict:
+    """대조 전에 **입력이 실제로 반영되는지** 확인한다.
+
+    왜 필요한가
+    ───────────
+    첫 대조에서 body-relative 가 41.5mm 어긋났는데, 그것만으로 "URDF 가 실기체와
+    다르다" 고 결론냈던 것은 성급했다. 같은 증상을 내는 원인이 최소 셋이다:
+
+      (a) SDK 가 joint_state 를 무시하고 현재 자세만 쓴다
+      (b) SDK 가 관절값을 자기 한계로 clamp 한다 (우리는 URDF 전 범위를 샘플링했다)
+      (c) SDK 의 chain 내 관절 **순서**가 우리 URDF 와 다르다
+      (d) 진짜로 링크 길이/관절 축이 다르다
+
+    (a)~(c) 는 전부 우리 입력 문제이고 고칠 수 있다. (d) 만이 데이터셋을
+    오염시키는 진짜 문제다. 그래서 셋을 먼저 배제한다.
+    """
+    out: dict = {}
+    print("\n  ── preflight: 입력이 반영되는가 ─────────────────────")
+
+    # (a) 응답성 — 서로 다른 q 두 개가 서로 다른 포즈를 내는가
+    qa = np.asarray(q0, dtype=float)
+    qb = qa.copy()
+    qb[1] += 0.30                      # 어깨 관절 하나만 크게 움직인다
+    qb = np.clip(qb, *arm.limits)
+    try:
+        sa, pa = _sdk_fk(motion, frame, ref, chain, qa)
+        sb, pb = _sdk_fk(motion, frame, ref, chain, qb)
+    except Exception as e:
+        print(f"     ❌ FK 호출 실패: {type(e).__name__}: {e}")
+        return {"ok": False, "reason": "fk_call_failed"}
+    if sa != "SUCCESS" or sb != "SUCCESS":
+        print(f"     ❌ MotionStatus {sa} / {sb}")
+        return {"ok": False, "reason": f"status {sa}/{sb}"}
+
+    d_sdk = float(np.linalg.norm(np.asarray(pa[:3]) - np.asarray(pb[:3]))) * 1e3
+    d_our = float(np.linalg.norm(arm.fk(qa)[:3, 3] - arm.fk(qb)[:3, 3])) * 1e3
+    out["responds"] = d_sdk > 1.0
+    print(f"     q[1] 를 0.30 rad 움직였을 때 EE 이동")
+    print(f"       SDK  {d_sdk:8.2f} mm")
+    print(f"       우리 {d_our:8.2f} mm")
+    if d_sdk < 1.0:
+        print("     🔴 SDK 포즈가 안 변합니다 → **joint_state 를 무시하고 현재 자세를**")
+        print("        **쓰고 있습니다.** 이 상태의 대조는 전부 무의미합니다.")
+        return {"ok": False, "reason": "joint_state_ignored", **out}
+    ratio = d_sdk / d_our if d_our > 1e-9 else float("nan")
+    out["motion_ratio"] = ratio
+    print(f"       비율 {ratio:.4f}  (1.0 이어야 정상)")
+    if abs(ratio - 1.0) > 0.02:
+        print("     ⚠️ 이동량이 다릅니다 — 링크 길이 또는 관절 축이 다를 수 있습니다.")
+
+    # (b) 결정론 — 같은 q 를 두 번
+    _, pa2 = _sdk_fk(motion, frame, ref, chain, qa)
+    drift = float(np.linalg.norm(np.asarray(pa[:3]) - np.asarray(pa2[:3]))) * 1e3
+    out["determinism_mm"] = drift
+    print(f"     같은 q 두 번 → 차이 {drift:.6f} mm "
+          f"{'✅' if drift < 1e-3 else '⚠️ 비결정론적'}")
+
+    # (c) clamp — 관절 한계 근처를 넘겨보고 반영되는지
+    lo, hi = arm.limits
+    q_edge = np.clip(hi - 1e-3, lo, hi)
+    q_over = hi + 0.30                 # 우리 한계를 넘는 값
+    try:
+        _, p_edge = _sdk_fk(motion, frame, ref, chain, q_edge)
+        _, p_over = _sdk_fk(motion, frame, ref, chain, q_over)
+        d_clamp = float(np.linalg.norm(
+            np.asarray(p_edge[:3]) - np.asarray(p_over[:3]))) * 1e3
+        out["clamp_probe_mm"] = d_clamp
+        print(f"     한계 초과 입력 반영 여부: {d_clamp:.3f} mm 차이 "
+              f"{'(clamp 됨 — 한계 밖 샘플은 못 씀)' if d_clamp < 0.5 else '(반영됨)'}")
+        out["clamps"] = d_clamp < 0.5
+    except Exception as e:
+        print(f"     clamp 확인 실패: {type(e).__name__}: {e}")
+
+    out["ok"] = True
+    return out
+
+
 def run_live(n: int, side: str, ref_frame: str, out: str,
-             no_init: bool = False) -> int:
+             no_init: bool = False, sampling: str = "local",
+             amp: float = 0.20) -> int:
     try:
         import galbot_sdk as sdk
     except ImportError as e:
@@ -380,8 +503,27 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
         inited = motion.init()
         print(f"GalbotMotion.init() → {inited}", flush=True)
     if not inited:
+        # ⚠️ init() 반환값이 사용 가능 여부를 정확히 나타내지 않는다.
+        #    실측: motion.init() → False 인데 바로 뒤 get_supported_chains() 는
+        #    정상 응답했다. 같은 로봇에서 직전 실행은 True 였다.
+        #    그래서 즉시 중단하지 않고 **데이터가 실제로 흐르는지**로 판단한다.
+        print("\n  ⚠️ motion.init() 이 False 입니다. 데이터가 흐르는지 확인합니다...")
+        probe_ok = False
+        try:
+            ch = motion.get_supported_chains()
+            probe_ok = bool(ch)
+            print(f"     get_supported_chains() → {sorted(ch) if ch else '(비어 있음)'}")
+        except Exception as e:
+            print(f"     get_supported_chains() 실패: {type(e).__name__}: {e}")
+        if probe_ok:
+            print("     → 응답이 옵니다. init 반환값을 무시하고 계속합니다.")
+            inited = True
+        else:
+            print("     → 응답이 없습니다. 중단합니다.")
+
+    if not inited:
         print("\n" + "=" * 74)
-        print("init() 이 False 를 반환했습니다. 무엇이 되는지 확인해봅니다.")
+        print("init() 이 False 이고 데이터도 오지 않습니다.")
         print("=" * 74)
         # ⚠️ init 실패 상태에서 **데이터 호출을 더 하면 segfault 로 죽는다** (실측).
         #    그래서 init 전에도 안전했던 소수만 부르고 즉시 멈춘다.
@@ -513,10 +655,43 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
             print(f"  {frame}: 우리 URDF 에 없음 — 건너뜀")
             continue
         q_lo, q_hi = arm.limits
+
+        # ⚠️ **기본은 현재 자세 주변 샘플링이다.**
+        #    전 범위 무작위 샘플링은 SDK 의 관절 한계를 넘을 수 있고, SDK 가
+        #    clamp 하면 우리와 다른 자세를 계산하게 되어 "기구학 불일치" 로
+        #    오진한다. 현재 자세 주변은 반드시 유효하고, 학습에서 실제로 쓰는
+        #    영역이기도 하다.
+        q_center = None
+        if sampling == "local":
+            try:
+                cjs = motion.get_chain_joint_state() or {}
+                if chain in cjs and len(cjs[chain]) == len(q_lo):
+                    q_center = np.asarray(cjs[chain], dtype=float)
+            except Exception:
+                pass
+            if q_center is None:
+                print(f"  ⚠️ 현재 자세를 못 읽어 전 범위 샘플링으로 대체합니다.")
+        mode = "현재 자세 ±%.2f rad" % amp if q_center is not None else "전 범위 무작위"
+        print(f"  샘플링: {mode}  n={n}")
+
+        pf = preflight(motion, frame, ref_frame, chain,
+                       q_center if q_center is not None else (q_lo + q_hi) / 2, arm)
+        results.setdefault("_preflight", {})[frame] = pf
+        if not pf.get("ok"):
+            results[frame] = {"error": "preflight 실패: " + str(pf.get("reason"))}
+            print(f"  → preflight 실패. 이 프레임은 건너뜁니다.")
+            continue
+
         ours, theirs = [], []
+        qs = []
         bad = 0
         for _ in range(n):
-            q = rng.uniform(q_lo, q_hi)
+            if q_center is not None:
+                q = np.clip(q_center + rng.uniform(-amp, amp, size=len(q_lo)),
+                            q_lo, q_hi)
+            else:
+                q = rng.uniform(q_lo, q_hi)
+            qs.append(q)
             try:
                 st, pose = motion.forward_kinematics(
                     frame, reference_frame=ref_frame, joint_state={chain: list(q)})
@@ -550,10 +725,21 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
         print(f"\n── {frame}")
         print(f"   절대  pos median {c['abs_pos_mm']['median']:8.3f} mm   "
               f"rot median {c['abs_rot_deg']['median']:7.4f}°")
-        print(f"   body-rel  pos max {c['body_rel_pos_mm']['max']:8.3f} mm   "
-              f"rot max {c['body_rel_rot_deg']['max']:7.4f}°   (root 차이에 불변)")
-        print(f"   spat-rel  pos max {c['spat_rel_pos_mm']['max']:8.3f} mm   "
-              f"rot max {c['spat_rel_rot_deg']['max']:7.4f}°   (tip 차이에 불변)")
+        bp, br = c["body_rel_pos_mm"], c["body_rel_rot_deg"]
+        print(f"   body-rel  pos median {bp['median']:8.3f}  p95 {bp['p95']:8.3f}  "
+              f"max {bp['max']:8.3f} mm   ← **주 판정 기준** (root 차이에 불변)")
+        print(f"             rot median {br['median']:8.4f}  p95 {br['p95']:8.4f}  "
+              f"max {br['max']:8.4f}°")
+        sp = c["spat_rel_pos_mm"]
+        print(f"   spat-rel  median {sp['median']:8.3f}  max {sp['max']:8.3f} mm"
+              f"   (root 가 다르면 커지는 게 정상 — 참고용)")
+        # 최악 샘플이 관절 한계에 붙어 있는지 — clamp 가설 확인
+        k = bp.get("argmax")
+        if k is not None and k + 1 < len(qs):
+            near = [f"j{i+1}" for i, v in enumerate(qs[k])
+                    if min(v - q_lo[i], q_hi[i] - v) < 0.05]
+            print(f"   최악 샘플 #{k}: 한계 0.05rad 이내 관절 "
+                  f"{near or '(없음)'}")
         print(f"   → {verdict}")
         for nt in notes:
             print(f"      {nt}")
@@ -569,6 +755,8 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
         "reference_frame": ref_frame,
         "motion_acquired_via": how,
         "n_samples": n,
+        "sampling": sampling,
+        "amp_rad": amp,
         "tol": {"rel_pos_mm": REL_POS_TOL_MM, "rel_rot_deg": REL_ROT_TOL_DEG},
         "best_match_frame": best,
         "passed": bool(best and results[best]["ok"]),
@@ -598,6 +786,11 @@ def main() -> int:
                          "torso_base_link 는 **없다**. 그래서 base_link 로 받고 "
                          "body-relative 대조(root 차이에 불변)로 판정한다")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--sampling", default="local", choices=["local", "full"],
+                    help="local=현재 자세 주변(기본, 안전) / "
+                         "full=관절 전 범위 무작위(SDK 한계를 넘을 수 있음)")
+    ap.add_argument("--amp", type=float, default=0.20,
+                    help="local 샘플링 진폭 [rad]")
     ap.add_argument("--no-init", action="store_true",
                     help="init() 없이 시도 — forward_kinematics 는 순수 계산이라 "
                          "로봇 연결 없이도 될 수 있다")
@@ -609,7 +802,8 @@ def main() -> int:
     out = args.out or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "robot", "assets",
         f"fk_crosscheck_{socket.gethostname()}.json")
-    return run_live(args.n, args.side, args.ref_frame, out, args.no_init)
+    return run_live(args.n, args.side, args.ref_frame, out, args.no_init,
+                    args.sampling, args.amp)
 
 
 def _hard_exit(code: int) -> None:
