@@ -88,7 +88,7 @@ define REQUIRE_SDK
 endef
 
 .DEFAULT_GOAL := help
-.PHONY: help setup check test gate1 gate1-real probe probe-check probe-check-min sdk-where find-sdk probe-live probe-entry fk-check analysis inspect e0-check e0-smoke bench lock clean
+.PHONY: help setup check test gate1 gate1-real probe probe-check probe-check-min sdk-where find-sdk find-urdf probe-live probe-entry fk-check analysis inspect e0-check e0-smoke bench lock clean
 
 # ─────────────────────────────────────────────────────────────────────────────
 help:  ## [모든 기계]
@@ -116,6 +116,7 @@ help:  ## [모든 기계]
 	@echo "    make probe-entry  [회사 Linux]  ⚠️ 핸들 획득이 막혔을 때 진입점 조사"
 	@echo "    make sdk-where    [모든 기계]  SDK 경로/파이썬/의존성 확인 (새 기계 1순위)"
 	@echo "    make find-sdk     [모든 기계]  SDK 가 안 잡힐 때 실제로 검색"
+	@echo "    make find-urdf    [회사 온보드]  로봇의 URDF 찾기 (세대 불일치 조사)"
 	@echo ""
 	@echo "  실측"
 	@echo "    make gate1-real   [회사 Linux + 로봇]  ⚠️ 실기체가 움직인다"
@@ -187,6 +188,13 @@ probe-check-min:  ## [모든 기계] numpy 없이 되는 자체검증만
 # 비어 있었기 때문에 필요해졌다. 아무것도 설치/변경하지 않고 읽기만 한다.
 find-sdk:  ## [모든 기계] SDK 위치를 실제로 검색
 	bash tools/find_sdk.sh $(PY)
+
+# 로봇이 실제로 쓰는 기구학 모델을 찾는다. fk-check 가 계통 오차를 보였고
+# 우리 URDF 출처가 galbot_one_golf_description(Golf 세대)인데 실기체는
+# Foxtrot hw2.2 라 세대가 다른 것으로 보인다.
+find-urdf:  ## [회사 온보드] 로봇의 URDF 찾기. 읽기만 한다
+	bash tools/find_urdf.sh 2>&1 | tee urdf_search_$(MACHINE).txt
+	@echo "→ urdf_search_$(MACHINE).txt 를 공유해주십시오."
 
 probe-check: probe-check-min  ## [모든 기계] SDK 없이 파서/안전차단 검증
 	$(PY) tools/fk_crosscheck.py --self-test
