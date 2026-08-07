@@ -575,6 +575,21 @@ if __name__ == "__main__":
 # **명령원이 둘**이 되어 예측할 수 없는 움직임이 난다. 읽기 전용 도구는
 # 경고만 하면 되지만, 움직이는 도구는 **막아야 한다.**
 
+# ⚠️ **두 종류를 구분해야 한다.** 안 그러면 GATE-1 이 항상 차단된다.
+#
+#   인프라(infra) : /data/galbot/bin/* — 로봇 자체 서비스 스택.
+#                   service_hpu_comm, service_motion_plan, robot_state_publish 등
+#                   **항상 떠 있는 것이 정상**이고, 우리가 SDK 로 말을 거는 대상이다.
+#                   2026-07-31 실측: 이것들이 떠 있는 상태에서 motion.init() 이
+#                   True 였다. 즉 경쟁자가 아니다.
+#
+#   클라이언트    : 그 외에 SDK 를 쓰는 프로세스. open_bridge / galbot_g1_client
+#                   같은 것들. **이쪽이 진짜 경쟁자**다 — GalbotMotion 을 배타적으로
+#                   잡고, 로봇에 명령을 낼 수도 있다.
+#
+# 차단은 클라이언트에 대해서만 한다. 인프라까지 막으면 아무것도 못 돌린다.
+_INFRA_PREFIX = "/data/galbot/bin/"
+
 _CLIENT_MARKERS = ("galbot_g1_client", "open_bridge", "galbot_sdk",
                    "/data/galbot/lib")
 
@@ -614,20 +629,28 @@ def find_other_sdk_clients(exclude_self: bool = True) -> list:
         except Exception:
             pass
         if any(m in hay for m in _CLIENT_MARKERS):
-            out.append({"pid": p, "cmdline": cmd[:200]})
+            kind = "infra" if cmd.startswith(_INFRA_PREFIX) else "client"
+            out.append({"pid": p, "cmdline": cmd[:200], "kind": kind})
     return out
 
 
 def report_other_clients(purpose: str = "read") -> list:
     """탐지 결과를 출력한다. purpose='move' 면 위험을 강하게 알린다.
 
-    반환: 발견된 클라이언트 목록 (호출자가 차단 여부를 결정한다)
+    반환: **경쟁 클라이언트만** (인프라는 제외). 호출자가 차단 여부를 결정한다.
+    인프라까지 반환하면 GATE-1 이 항상 차단되어 도구가 쓸모없어진다.
     """
-    others = find_other_sdk_clients()
+    found = find_other_sdk_clients()
+    infra = [o for o in found if o.get("kind") == "infra"]
+    others = [o for o in found if o.get("kind") != "infra"]
+
+    if infra:
+        print(f"  [sdk] 로봇 자체 서비스 {len(infra)}개 동작 중 "
+              f"(정상 — 우리가 말을 거는 대상)", flush=True)
     if not others:
-        print("  [sdk] 다른 SDK 클라이언트 없음 ✅", flush=True)
+        print("  [sdk] 경쟁 SDK 클라이언트 없음 ✅", flush=True)
         return others
-    print("\n  ⚠️ **다른 프로세스가 SDK 를 쓰고 있습니다:**", flush=True)
+    print("\n  ⚠️ **다른 SDK 클라이언트가 동작 중입니다:**", flush=True)
     for o in others:
         print(f"     pid {o['pid']}: {o['cmdline'][:150]}", flush=True)
     if purpose == "move":
