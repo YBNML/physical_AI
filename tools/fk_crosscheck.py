@@ -482,6 +482,23 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
         if not rok:
             print("⚠️ robot.init() 이 False 입니다. Motion 이 관절 상태를 못 받을 수 "
                   "있습니다.", file=sys.stderr)
+        # ⚠️ **robot 데이터가 실제로 흐를 때까지 기다린 뒤 motion.init() 을 부른다.**
+        #    실측 대조: probe-live 는 robot.init() 뒤 get_* 를 수십 번 부르느라
+        #    시간이 흘렀고 motion.init() 이 True 였다. fk_crosscheck 는 곧바로
+        #    불렀고 False 였다. motion 이 로봇 모델을 로봇에서 받아오는 구조로
+        #    보이며, 그 전에 부르면 INIT_FAILED 가 된다.
+        print("robot 데이터 도착 대기...", flush=True)
+        t_end = time.time() + 20.0
+        while time.time() < t_end:
+            try:
+                if robot.get_joint_group_names():
+                    print("  ✅ robot 데이터 흐름 확인", flush=True)
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        else:
+            print("  ⚠️ 20초 동안 robot 관절 그룹이 비어 있습니다.", flush=True)
     except Exception as e:
         print(f"⚠️ GalbotRobot 준비 실패: {type(e).__name__}: {e}", file=sys.stderr)
         print("   Motion 이 관절 상태를 못 받을 수 있습니다.", file=sys.stderr)
@@ -501,22 +518,45 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
         print("--no-init: init() 을 건너뜁니다 (forward_kinematics 는 순수 계산)")
         inited = True
     else:
-        print("GalbotMotion.init() 호출 중...", flush=True)
-        inited = motion.init()
-        print(f"GalbotMotion.init() → {inited}", flush=True)
+        # ⚠️ **재시도한다.** 한 번 False 라고 끝이 아니다 — 로봇에서 모델을
+        #    받아오는 데 시간이 걸린다.
+        inited = False
+        for attempt in range(1, 7):
+            print(f"GalbotMotion.init() 시도 {attempt}...", flush=True)
+            try:
+                inited = bool(motion.init())
+            except Exception as e:
+                print(f"  예외: {type(e).__name__}: {e}", flush=True)
+                inited = False
+            # ⚠️ 준비 여부는 **get_link_names()** 로 판정한다.
+            #    get_supported_chains() 는 정적 설정이라 init 실패해도 응답한다
+            #    (실측: chains 5개인데 link 0개, ee_frames 0개, FK 는 INIT_FAILED).
+            #    그걸 "데이터가 흐른다" 로 읽은 것이 내 오판이었다.
+            try:
+                nlink = len(motion.get_link_names(only_end_effector=False))
+            except Exception:
+                nlink = 0
+            print(f"  init={inited}  get_link_names={nlink}개", flush=True)
+            if nlink:
+                inited = True
+                break
+            time.sleep(2.0)
     if not inited:
         # ⚠️ init() 반환값이 사용 가능 여부를 정확히 나타내지 않는다.
         #    실측: motion.init() → False 인데 바로 뒤 get_supported_chains() 는
         #    정상 응답했다. 같은 로봇에서 직전 실행은 True 였다.
         #    그래서 즉시 중단하지 않고 **데이터가 실제로 흐르는지**로 판단한다.
         print("\n  ⚠️ motion.init() 이 False 입니다. 데이터가 흐르는지 확인합니다...")
+        # ⚠️ get_supported_chains() 로 판단하면 안 된다 — 정적 설정이라
+        #    init 실패해도 응답한다. get_link_names() 가 진짜 지표다.
         probe_ok = False
         try:
-            ch = motion.get_supported_chains()
-            probe_ok = bool(ch)
-            print(f"     get_supported_chains() → {sorted(ch) if ch else '(비어 있음)'}")
+            lk = motion.get_link_names(only_end_effector=False)
+            probe_ok = bool(lk)
+            print(f"     get_link_names() → {len(lk)}개 "
+                  f"{'(모델 로드됨)' if lk else '(모델 없음 — init 실제 실패)'}")
         except Exception as e:
-            print(f"     get_supported_chains() 실패: {type(e).__name__}: {e}")
+            print(f"     get_link_names() 실패: {type(e).__name__}: {e}")
         if probe_ok:
             print("     → 응답이 옵니다. init 반환값을 무시하고 계속합니다.")
             inited = True
@@ -638,12 +678,28 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
     print(f"  우리 tip 후보 중 SDK 에 없는 것 : {missing or '(없음)'}")
     if missing:
         print("  → 없는 것은 건너뜁니다. SDK 모델에 그 링크가 없다는 뜻입니다.")
+    if not sdk_links:
+        # 링크 목록이 통째로 비었다 = 기구학 모델 자체가 안 올라왔다.
+        # 이 상태에서 프레임마다 preflight 를 돌리면 같은 INIT_FAILED 를
+        # 네 번 찍을 뿐이다.
+        print("\n  🔴 SDK 링크 목록이 비어 있습니다 — **기구학 모델이 로드되지**")
+        print("     **않았습니다.** motion.init() 이 실제로 실패한 상태입니다.")
+        print("     (get_supported_chains 는 정적 설정이라 이 경우에도 응답합니다)")
+        print("\n  복구:")
+        print("     1) ps aux | grep -i galbot | grep python   ← 우리 잔류 프로세스")
+        print("        남아 있으면 kill 하십시오.")
+        print("     2) 그래도 안 되면 로봇 소프트웨어를 재시작해야 합니다.")
+        print("     3) probe-live 는 성공했었습니다 — 그때는 robot.init() 뒤")
+        print("        get_* 를 수십 번 부르며 시간이 흘렀습니다. 시간 문제라면")
+        print("        재실행으로 풀릴 수 있습니다.")
+        return 2
     if not present:
         print("\n  🔴 시도할 프레임이 없습니다. SDK 의 팔 관련 링크 목록:")
         for ln in sorted(x for x in sdk_links if side in x):
             print(f"     {ln}")
         print("\n  → 위 목록에서 맞는 이름을 --tip 으로 지정하거나,")
         print("     robot/g1_kinematics.py 의 TIP_CANDIDATES 를 갱신해야 합니다.")
+        return 2
 
     results: dict[str, dict] = {}
     for tip in TIP_CANDIDATES:
