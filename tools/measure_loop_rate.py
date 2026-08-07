@@ -395,15 +395,19 @@ class G1Adapter:
             )
         self._track(st)
 
-    def prime(self) -> None:
-        """측정 시작 전 1회 — 첫 호출 비용을 측정 밖으로 뺀다."""
+    def prime(self) -> float:
+        """측정 시작 전 1회 — 첫 호출 비용을 측정 밖으로 뺀다.
+
+        **현재 관절 각도를 반환한다.** 호출부가 이걸 사인의 중심으로 써야 한다.
+        """
         if self.dry_run:
-            return
+            return 0.0
         _, p, _ = self.read_state()
         self.send_position(p)
         print(f"[adapter] prime OK — send_api={self.send_api}, "
               f"time_from_start_s={self.horizon_s}, ack={self._fmt_ack()}")
         self.reset_ack()
+        return p
 
     def _fmt_ack(self) -> str:
         if not self.ack_total:
@@ -933,6 +937,8 @@ def main() -> int:
                     choices=["onboard", "external", "unspecified"],
                     help="측정 위치 (결과에 기록됨)")
     ap.add_argument("--joint", default="left_arm_joint4")
+    ap.add_argument("--allow-far-center", action="store_true",
+                    help="중심각이 현재 위치에서 멀어도 강제 실행 (위험)")
     ap.add_argument("--allow-shared", action="store_true",
                     help="다른 SDK 클라이언트가 있어도 강제 실행 (위험 — 권장 안 함)")
     ap.add_argument("--send-api", default="commands",
@@ -944,7 +950,9 @@ def main() -> int:
                          "SDK 기본값 10.0 은 고속 스트리밍에 쓸 수 없고, "
                          "벤더 고주파 예제는 0.0(보간 없음)을 쓴다")
     ap.add_argument("--amp-deg", type=float, default=2.0, help="진폭 (도)")
-    ap.add_argument("--center-deg", type=float, default=0.0)
+    ap.add_argument("--center-deg", type=float, default=None,
+                    help="사인의 중심 각도 [deg]. **기본값은 현재 관절 각도**다. "
+                         "0 을 명시하면 관절을 0 도로 끌고 가므로 위험할 수 있다")
     ap.add_argument("--dwell", type=float, default=6.0, help="rate당 측정 시간 (초)")
     ap.add_argument("--rates", default="10,20,30,50,75,100,150,200,300,500")
     ap.add_argument("--bode-freqs", default="0.5,1,2,3,5,7,10")
@@ -963,7 +971,8 @@ def main() -> int:
     args = ap.parse_args()
 
     amp = math.radians(args.amp_deg)
-    center = math.radians(args.center_deg)
+    # center 는 prime() 뒤에 현재 각도로 채운다 (아래 참조)
+    center = None if args.center_deg is None else math.radians(args.center_deg)
     rates = [float(x) for x in args.rates.split(",")]
     bfreqs = [float(x) for x in args.bode_freqs.split(",")]
 
@@ -976,6 +985,33 @@ def main() -> int:
     if args.dry_run:
         print("  모드     : DRY-RUN (tau=15ms 시뮬레이션 플랜트)")
     else:
+        print("\n  ── 이 측정이 로봇을 어떻게 움직이는가 ──────────────")
+        print(f"     관절     : {args.joint} 하나만")
+        print(f"     진폭     : ±{args.amp_deg}°  (현재 각도 중심)")
+        print(f"     PART A/C : 0.5 Hz 사인 · 계단")
+        print(f"     PART B   : {args.bode_freqs} Hz 스윕 ← 가장 빠른 구간")
+        try:
+            sys.path.insert(0, os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "..", "robot"))
+            import numpy as _np
+            from g1_kinematics import G1Arm as _A
+            _side = "left" if args.joint.startswith("left") else "right"
+            _arm = _A(_side)
+            _lo, _hi = _arm.limits
+            _q = (_lo + _hi) / 2.0
+            _idx = int(args.joint.rstrip("0123456789").join([]) or 0) if False else None
+            # 관절 번호를 이름에서 뽑는다 (…joint4 → 3)
+            _n = "".join(ch for ch in args.joint if ch.isdigit())
+            _j = int(_n) - 1 if _n else 3
+            _a, _b = _q.copy(), _q.copy()
+            _a[_j] -= amp; _b[_j] += amp
+            _pp = float(_np.linalg.norm(_arm.fk(_b)[:3, 3] - _arm.fk(_a)[:3, 3])) * 1e3
+            _fmax = max(float(x) for x in args.bode_freqs.split(","))
+            print(f"     → 손끝 이동 약 {_pp:.0f} mm (peak-to-peak)")
+            print(f"        최대 지령 속도 약 {_pp/2*2*math.pi*_fmax:.0f} mm/s "
+                  f"({_fmax:.0f}Hz 구간)")
+        except Exception:
+            pass
         print("\n  ⚠️  팔 주변을 비우고 e-stop을 손 닿는 곳에 두십시오.")
         print("  ⚠️  이 머신에서 다른 워크로드를 돌리지 마십시오 (jitter 오염).")
         try:
@@ -988,7 +1024,27 @@ def main() -> int:
     ad = G1Adapter(dry_run=args.dry_run, joint_name=args.joint,
                    horizon_s=args.horizon_s, send_api=args.send_api,
                    allow_shared=args.allow_shared)
-    ad.prime()
+    q_now = ad.prime()
+
+    # 🔴 **중심은 현재 각도여야 한다.**
+    #    이전 기본값은 0.0 rad 이었는데, 실측에서 left_arm_joint4 의 현재 각도가
+    #    -1.6762 rad(-96°) 였다. 그대로 두면 첫 명령이 관절을 0° 로 끌고 가
+    #    ±2° 가 아니라 **96° 를 휘두른다.** time_from_start_s=0.0(보간 없음)과
+    #    겹치면 급격한 대형 동작이 된다. 안전 문제라 기본값을 바꾼다.
+    if center is None:
+        center = q_now
+        print(f"  중심각: 현재 위치 {math.degrees(center):+.2f}° 사용")
+    else:
+        delta = abs(math.degrees(center - q_now))
+        print(f"  중심각: 지정값 {math.degrees(center):+.2f}° "
+              f"(현재 {math.degrees(q_now):+.2f}°, 차이 {delta:.1f}°)")
+        if not args.dry_run and delta > 5.0 and not args.allow_far_center:
+            sys.exit(
+                f"\n🔴 중단합니다 — 지정한 중심각이 현재 위치에서 {delta:.1f}° "
+                f"떨어져 있습니다.\n"
+                f"  측정 시작과 동시에 관절이 그만큼 급격히 움직입니다.\n"
+                f"  --center-deg 를 빼면 현재 위치를 중심으로 씁니다.\n"
+                f"  의도한 것이라면 --allow-far-center 로 강제하십시오.")
     results = {
         "meta": {
             "host": args.host,
