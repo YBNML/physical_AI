@@ -553,9 +553,14 @@ if __name__ == "__main__":
 #
 # 관측: motion.init() 이 계속 False 였는데, 원인은 우리 세션 잔류가 아니라
 #       **다른 프로세스가 SDK 를 점유**하고 있었기 때문이다.
-#       (2026-07-31 확인: 그 프로세스는 사용자 본인이 로봇 안에서 띄운
-#        open_bridge 클라이언트였다. 즉 "다른 사람" 이 아니라 "다른 세션" 이다.
-#        소유자가 누구든 GalbotMotion 을 못 잡는 것은 동일하다.)
+#       2026-07-31 확인: 그 프로세스는 **로봇에 기본으로 도는 백그라운드
+#       서비스**다 (open_bridge → ws://192.168.0.44:8001). 우리 코드도 아니고
+#       다른 사람이 띄운 것도 아니다. 즉 **이 로봇의 정상 상태에서 GalbotMotion
+#       은 이미 점유돼 있다.**
+#
+#       이건 아키텍처 제약이다 — 우리 정책이 런타임에 GalbotMotion(IK/FK/
+#       모션플래닝)을 쓰려면 그 서비스를 멈춰야 한다. GalbotRobot(관절 명령,
+#       센서 읽기)은 다중 접근이 되므로 GATE-1 자체는 영향받지 않는다.
 #
 #           galbot_g1_client.py --server ws://... --id galbot_g1_no2
 #           LD_LIBRARY_PATH=/data/galbot/lib     ← 우리와 같은 SDK
@@ -633,8 +638,11 @@ def report_other_clients(purpose: str = "read") -> list:
         print("\n  ℹ️ 읽기 전용이라 움직임 위험은 없지만, **GalbotMotion 은 배타적**")
         print("     이라 motion.init() 이 실패합니다 (실측). FK 대조를 하려면")
         print("     저 세션이 먼저 끝나야 합니다.")
-    print("\n  → 내 프로세스인지 먼저 확인하십시오:")
-    print("       ps -o pid,user,etime,cmd -p <pid>")
-    print("     내 것이면 정지시키고 재실행하면 됩니다.")
-    print("     남의 것이면 kill 하지 말고 끝날 때까지 기다리십시오.", flush=True)
+    print("\n  → 정체를 먼저 확인하십시오 (kill 전에):")
+    print("       ps -o pid,ppid,user,etime,cmd -p <pid>")
+    print("       systemctl --user list-units | grep -i galbot")
+    print("       systemctl list-units | grep -i galbot")
+    print("     - 로봇 기본 서비스면: 멈춰도 자동 재시작될 수 있습니다.")
+    print("       systemctl 로 stop 해야 확실히 멈춥니다.")
+    print("     - 남이 띄운 것이면 kill 하지 말고 기다리십시오.", flush=True)
     return others

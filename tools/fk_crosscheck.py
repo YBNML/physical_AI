@@ -696,8 +696,10 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
             print("     실패합니다 → **Motion 은 배타적**이고 Robot 은 다중 접근을")
             print("     허용하는 것으로 보입니다.")
             print("\n     → 저 세션이 끝나야 FK 대조가 가능합니다.")
-            print("       내 프로세스인지 확인:  ps -o pid,user,etime,cmd -p <pid>")
-            print("       내 것이면 정지 후 재실행. 남의 것이면 기다릴 것.")
+            print("       정체 확인:  ps -o pid,ppid,user,etime,cmd -p <pid>")
+            print("                   systemctl list-units | grep -i galbot")
+            print("       로봇 기본 서비스라면 systemctl stop 으로 멈춰야 하며,")
+            print("       kill 만 하면 자동 재시작될 수 있습니다.")
         else:
             print("\n  다른 클라이언트는 안 보입니다. 그렇다면:")
             print("     1) 우리 이전 실행의 세션이 남았을 수 있습니다 (재부팅/재시작)")
