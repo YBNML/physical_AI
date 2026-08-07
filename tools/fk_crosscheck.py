@@ -482,10 +482,13 @@ def preflight(motion, frame: str, ref: str, chain: str, q0, arm) -> dict:
 
 def run_live(n: int, side: str, ref_frame: str, out: str,
              no_init: bool = False, sampling: str = "local",
-             amp: float = 0.20) -> int:
-    try:
+             amp: float = 0.20, _fake=None) -> int:
+    if _fake is not None:
+        sdk = _fake            # 자체 검증용 가짜 SDK 주입
+    else:
+      try:
         import galbot_sdk as sdk
-    except ImportError as e:
+      except ImportError as e:
         print(f"galbot_sdk import 실패: {e}\n"
               "  source /opt/galbot/galbot_sdk/linux-x86_64-gcc940/setup.sh "
               "(bash 필요)", file=sys.stderr)
@@ -755,6 +758,7 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
             results[frame] = {"error": f"우리 URDF 에 {frame} 없음: {e}"}
             print(f"  {frame}: 우리 URDF 에 없음 — 건너뜀")
             continue
+        q_lo, q_hi = arm.limits      # ← chain12 블록보다 **먼저** 정의해야 한다
 
         # ★ **base_link 기준 전체 체인.** 이게 이번 개정의 핵심이다.
         #
@@ -778,7 +782,6 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
         except Exception as e:
             print(f"  ⚠️ base_link 전체 체인 실패: {e} — 상대 비교만 합니다.")
             n_leg = 0
-        q_lo, q_hi = arm.limits
 
         # ⚠️ **기본은 현재 자세 주변 샘플링이다.**
         #    전 범위 무작위 샘플링은 SDK 의 관절 한계를 넘을 수 있고, SDK 가
@@ -943,6 +946,8 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
 def main() -> int:
     ap = argparse.ArgumentParser(description="SDK FK 와 우리 FK 대조")
     ap.add_argument("--self-test", action="store_true", help="SDK 없이 로직 검증")
+    ap.add_argument("--self-test-live", action="store_true",
+                    help="가짜 SDK 로 run_live 전 경로 검증 (로봇 불필요)")
     ap.add_argument("--n", type=int, default=200, help="표본 수")
     ap.add_argument("--side", default="left", choices=["left", "right"])
     ap.add_argument("--ref-frame", default="base_link",
@@ -962,7 +967,10 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.self_test:
-        return self_test()
+        rc = self_test()
+        return rc or self_test_live()
+    if args.self_test_live:
+        return self_test_live()
 
     out = args.out or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "..", "robot", "assets",
@@ -973,6 +981,120 @@ def main() -> int:
 
 # 종료 시 반납할 핸들. 여러 경로에서 return 하므로 전역에 모아둔다.
 _HANDLES: dict = {"robot": None, "motion": None}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 가짜 SDK — run_live 전 경로를 맥에서 태운다
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# 왜 필요한가: self-test 가 compare/interpret 만 덮고 run_live 는 안 덮었다.
+# 그 결과 `q_lo` 를 정의 전에 쓰는 단순한 순서 오류가 **로봇에서야** 드러났고,
+# 왕복 한 번을 썼다. 온보드는 회사에 있으므로 그 비용이 크다.
+#
+# 이 가짜는 우리 URDF 로 FK 를 계산하므로 **반드시 PASS 여야 한다.**
+# PASS 가 안 나오면 run_live 배선이 깨진 것이다.
+
+
+class _FakeMotion:
+    def __init__(self, side="left"):
+        self.side = side
+        self._chain = build_chain(f"{side}_arm_end_effector_mount_link",
+                                  root="base_link")
+        self._n = len(self._chain.dof_idx)
+        self._leg = [0.4992, 1.4996, 0.9996, -0.0003, 0.0]
+        self._arm = [1.1234, -1.5077, -0.5757, -1.6762, -0.0005, -0.5491, -0.0001]
+
+    def init(self):
+        return True
+
+    def get_supported_chains(self):
+        return {"head", "left_arm", "leg", "mobile_base", "right_arm", "torso"}
+
+    def get_supported_frames(self):
+        return {"base_link", "map", "world"}
+
+    def get_supported_ee_frames(self):
+        return {"camera_base", "camera_object", "ee_base"}
+
+    def get_link_names(self, only_end_effector=False):
+        return [l.name.replace("_joint", "_link") for l in self._chain.links] + [
+            f"{self.side}_arm_end_effector_mount_link"]
+
+    def get_chain_joint_state(self):
+        return {"leg": list(self._leg), f"{self.side}_arm": list(self._arm),
+                "torso": self._leg[3:5], "head": [0.0, 0.3487]}
+
+    def forward_kinematics(self, target_frame, reference_frame="base_link",
+                           joint_state=None, params=None):
+        js = joint_state or {}
+        leg = list(js.get("leg", self._leg))
+        arm = list(js.get(f"{self.side}_arm", self._arm))
+        T = self._chain.fk(np.asarray(leg + arm, dtype=float))
+        # [x y z qx qy qz qw] 로 돌려준다 (SDK 와 같은 길이 7)
+        R = T[:3, :3]
+        w = math.sqrt(max(0.0, 1 + R[0, 0] + R[1, 1] + R[2, 2])) / 2
+        if w < 1e-8:
+            w = 1e-8
+        q = [(R[2, 1] - R[1, 2]) / (4 * w), (R[0, 2] - R[2, 0]) / (4 * w),
+             (R[1, 0] - R[0, 1]) / (4 * w), w]
+        return _FakeStatus("SUCCESS"), list(T[:3, 3]) + q
+
+
+class _FakeStatus:
+    def __init__(self, name):
+        self.name = name
+
+
+class _FakeRobot:
+    def init(self, s=None):
+        return True
+
+    def get_joint_group_names(self):
+        return ["head", "left_arm", "right_arm", "left_gripper",
+                "right_gripper", "leg", "chassis"]
+
+    def get_device_information(self):
+        return {"model": "G1", "serial_number": "FAKE", "manufacturer": "Galbot"}
+
+
+class _FakeSDK:
+    """sdk_entry.acquire 가 찾는 모양을 흉내낸다."""
+    __name__ = "fake_galbot_sdk"
+
+    class g1:
+        GalbotRobot = _FakeRobot
+        GalbotMotion = _FakeMotion
+
+    GalbotRobot = _FakeRobot
+    GalbotMotion = _FakeMotion
+
+
+def self_test_live() -> int:
+    """가짜 SDK 로 run_live 전 경로를 태운다. **PASS 가 나와야 정상.**"""
+    import tempfile
+    print("=" * 74)
+    print("run_live 배선 검증 (가짜 SDK — 로봇 불필요)")
+    print("=" * 74)
+    fake = _FakeSDK()
+    # acquire 를 가짜용으로 우회
+    orig = sdk_entry.acquire
+    sdk_entry.acquire = lambda mod, name, **kw: (
+        (_FakeRobot() if name == "GalbotRobot" else _FakeMotion()),
+        f"fake.{name}()")
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
+            tmp = f.name
+        rc = run_live(20, "left", "base_link", tmp, False, "local", 0.20,
+                      _fake=fake)
+    finally:
+        sdk_entry.acquire = orig
+    print()
+    if rc == 0:
+        print("✅ run_live 배선 정상 — 가짜 FK 와 완전 일치 (PASS)")
+        return 0
+    print(f"❌ run_live 가 rc={rc} 를 반환했습니다. 배선이 깨졌습니다.")
+    print("   가짜는 우리 URDF 로 FK 를 계산하므로 반드시 PASS 여야 합니다.")
+    return 1
 
 
 def sdk_teardown(robot=None, motion=None) -> None:
