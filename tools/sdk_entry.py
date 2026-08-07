@@ -553,6 +553,9 @@ if __name__ == "__main__":
 #
 # 관측: motion.init() 이 계속 False 였는데, 원인은 우리 세션 잔류가 아니라
 #       **다른 프로세스가 SDK 를 점유**하고 있었기 때문이다.
+#       (2026-07-31 확인: 그 프로세스는 사용자 본인이 로봇 안에서 띄운
+#        open_bridge 클라이언트였다. 즉 "다른 사람" 이 아니라 "다른 세션" 이다.
+#        소유자가 누구든 GalbotMotion 을 못 잡는 것은 동일하다.)
 #
 #           galbot_g1_client.py --server ws://... --id galbot_g1_no2
 #           LD_LIBRARY_PATH=/data/galbot/lib     ← 우리와 같은 SDK
@@ -623,12 +626,15 @@ def report_other_clients(purpose: str = "read") -> list:
     for o in others:
         print(f"     pid {o['pid']}: {o['cmdline'][:150]}", flush=True)
     if purpose == "move":
-        print("\n  🔴 이 도구는 **로봇을 실제로 움직입니다.** 명령원이 둘이 되면")
-        print("     예측할 수 없는 동작이 발생합니다. 상대 작업이 끝난 뒤 실행하십시오.")
+        print("\n  🔴 이 도구는 **로봇을 실제로 움직입니다.** 그 프로세스가 로봇을")
+        print("     제어할 수 있다면 명령원이 둘이 되어 예측할 수 없는 동작이 납니다.")
+        print("     **소유자가 누구든 위험은 같습니다.**")
     else:
-        print("\n  ℹ️ 읽기 전용이라 위험하지는 않지만, **GalbotMotion 은 배타적**이라")
-        print("     motion.init() 이 실패할 수 있습니다 (실측). 그 경우 상대 작업이")
-        print("     끝나야 FK 대조가 가능합니다.")
-    print("     ⚠️ 이 프로세스를 임의로 kill 하지 마십시오 — 다른 사람의 작업입니다.",
-          flush=True)
+        print("\n  ℹ️ 읽기 전용이라 움직임 위험은 없지만, **GalbotMotion 은 배타적**")
+        print("     이라 motion.init() 이 실패합니다 (실측). FK 대조를 하려면")
+        print("     저 세션이 먼저 끝나야 합니다.")
+    print("\n  → 내 프로세스인지 먼저 확인하십시오:")
+    print("       ps -o pid,user,etime,cmd -p <pid>")
+    print("     내 것이면 정지시키고 재실행하면 됩니다.")
+    print("     남의 것이면 kill 하지 말고 끝날 때까지 기다리십시오.", flush=True)
     return others

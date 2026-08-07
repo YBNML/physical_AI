@@ -695,8 +695,9 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
             print("\n     GalbotRobot.init() 은 성공하는데 GalbotMotion.init() 만")
             print("     실패합니다 → **Motion 은 배타적**이고 Robot 은 다중 접근을")
             print("     허용하는 것으로 보입니다.")
-            print("\n     ⚠️ 저 프로세스를 kill 하지 마십시오 — 다른 사람의 작업입니다.")
-            print("     상대 작업이 끝난 뒤 다시 실행하십시오.")
+            print("\n     → 저 세션이 끝나야 FK 대조가 가능합니다.")
+            print("       내 프로세스인지 확인:  ps -o pid,user,etime,cmd -p <pid>")
+            print("       내 것이면 정지 후 재실행. 남의 것이면 기다릴 것.")
         else:
             print("\n  다른 클라이언트는 안 보입니다. 그렇다면:")
             print("     1) 우리 이전 실행의 세션이 남았을 수 있습니다 (재부팅/재시작)")
