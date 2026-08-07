@@ -632,16 +632,38 @@ class BodePoint:
     gain_db: float
     phase_deg: float
     n_samples: int
+    # 정속 스윕이므로 주파수마다 진폭이 다르다. SNR 판단에 필요하므로 기록한다.
+    amp_deg: float = float("nan")
+    peak_speed_mm_s: float = float("nan")
 
 
 def measure_bode(ad: G1Adapter, freqs: list[float], amplitude_rad: float,
                  center_rad: float, cycles: int = 12,
-                 cmd_hz: float = 200.0) -> list[BodePoint]:
-    """PART B — 주파수별 사인 주입 후 상관법으로 크기/위상 추출."""
+                 cmd_hz: float = 200.0,
+                 mm_per_rad: float = 0.0,
+                 max_speed_mm_s: float = 0.0) -> list[BodePoint]:
+    """PART B — 주파수별 사인 주입 후 상관법으로 크기/위상 추출.
+
+    ⚠️ **정속 스윕(constant-velocity sweep).**
+    사인의 최대 속도는 A·ω 이므로, 진폭을 고정하면 고주파에서 속도가 비례해
+    커진다. ±2° 고정이면 10Hz 에서 손끝 지령 속도가 1300 mm/s 에 달한다.
+
+    그래서 주파수마다 진폭을 줄여 **손끝 속도를 상한 이하로 묶는다**:
+        A_f = min(A, v_max / (ω · mm_per_rad))
+
+    측정 품질은 유지된다 — gain 은 응답/지령의 **비율**이라 진폭이 작아도
+    성립하고, 위상도 마찬가지다. 대역폭을 찾으려면 고주파가 필요한데 진폭을
+    낮추는 쪽이 주파수를 포기하는 것보다 낫다.
+    실제로 쓴 진폭을 결과에 기록해 나중에 SNR 을 판단할 수 있게 한다.
+    """
     out: list[BodePoint] = []
     period_cmd = 1.0 / cmd_hz
 
     for f in freqs:
+        amp_f = amplitude_rad
+        if mm_per_rad > 0 and max_speed_mm_s > 0:
+            cap = max_speed_mm_s / (2.0 * math.pi * f * mm_per_rad)
+            amp_f = min(amplitude_rad, cap)
         dur = max(1.5, cycles / f)
         t0 = time.perf_counter()
         next_t = t0
@@ -657,7 +679,7 @@ def measure_bode(ad: G1Adapter, freqs: list[float], amplitude_rad: float,
             if now < next_t:
                 continue
 
-            cmd = center_rad + amplitude_rad * math.sin(2 * math.pi * f * t)
+            cmd = center_rad + amp_f * math.sin(2 * math.pi * f * t)
             ad.send_position(cmd)
             _ts, pos, _eff = ad.read_state()
 
@@ -677,15 +699,20 @@ def measure_bode(ad: G1Adapter, freqs: list[float], amplitude_rad: float,
         i_c = 2.0 * acc_i / n
         q_c = 2.0 * acc_q / n
         mag = math.hypot(i_c, q_c)
-        gain = mag / amplitude_rad if amplitude_rad > 0 else float("nan")
+        gain = mag / amp_f if amp_f > 0 else float("nan")
         out.append(BodePoint(
             freq_hz=f,
             gain_db=20.0 * math.log10(gain) if gain > 1e-12 else float("-inf"),
             phase_deg=math.degrees(math.atan2(q_c, i_c)),
             n_samples=n,
+            amp_deg=math.degrees(amp_f),
+            peak_speed_mm_s=(math.degrees(amp_f) * mm_per_rad * math.pi / 180.0
+                             * 2 * math.pi * f) if mm_per_rad else float("nan"),
         ))
-        print(f"  {f:6.2f} Hz   gain {out[-1].gain_db:+6.2f} dB   "
-              f"phase {out[-1].phase_deg:+7.1f}°   n={n}")
+        b = out[-1]
+        print(f"  {f:6.2f} Hz   gain {b.gain_db:+6.2f} dB   "
+              f"phase {b.phase_deg:+7.1f}°   진폭 ±{b.amp_deg:.3f}°  "
+              f"속도 {b.peak_speed_mm_s:6.1f} mm/s   n={n}")
 
     return out
 
@@ -937,6 +964,10 @@ def main() -> int:
                     choices=["onboard", "external", "unspecified"],
                     help="측정 위치 (결과에 기록됨)")
     ap.add_argument("--joint", default="left_arm_joint4")
+    ap.add_argument("--max-speed", type=float, default=100.0,
+                    help="손끝(TCP) 지령 속도 상한 [mm/s]. 이 값을 지키도록 "
+                         "주파수마다 진폭을 줄인다(정속 스윕). 0 이면 상한 없음. "
+                         "상한이 없으면 10Hz 에서 1300 mm/s 까지 나간다")
     ap.add_argument("--allow-far-center", action="store_true",
                     help="중심각이 현재 위치에서 멀어도 강제 실행 (위험)")
     ap.add_argument("--allow-shared", action="store_true",
@@ -1008,8 +1039,12 @@ def main() -> int:
             _pp = float(_np.linalg.norm(_arm.fk(_b)[:3, 3] - _arm.fk(_a)[:3, 3])) * 1e3
             _fmax = max(float(x) for x in args.bode_freqs.split(","))
             print(f"     → 손끝 이동 약 {_pp:.0f} mm (peak-to-peak)")
-            print(f"        최대 지령 속도 약 {_pp/2*2*math.pi*_fmax:.0f} mm/s "
-                  f"({_fmax:.0f}Hz 구간)")
+            if args.max_speed > 0:
+                print(f"        지령 속도 상한 {args.max_speed:.0f} mm/s "
+                      f"— 고주파에서는 진폭을 줄여 이 값을 지킵니다")
+            else:
+                print(f"        ⚠️ 속도 상한 없음 — {_fmax:.0f}Hz 에서 "
+                      f"약 {_pp/2*2*math.pi*_fmax:.0f} mm/s")
         except Exception:
             pass
         print("\n  ⚠️  팔 주변을 비우고 e-stop을 손 닿는 곳에 두십시오.")
@@ -1065,6 +1100,46 @@ def main() -> int:
     }
 
     try:
+        # 손끝 감도 [mm per rad] — 현재 자세에서 이 관절이 EE 를 얼마나 움직이는가.
+        # 정속 스윕의 진폭 계산에 쓴다.
+        mm_per_rad = 0.0
+        try:
+            sys.path.insert(0, os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "..", "robot"))
+            import numpy as _np
+            from g1_kinematics import G1Arm as _A
+            _side = "left" if ad.joint_name.startswith("left") else "right"
+            _arm = _A(_side)
+            _n = "".join(ch for ch in ad.joint_name if ch.isdigit())
+            _j = int(_n) - 1 if _n else 3
+            _lo, _hi = _arm.limits
+            _q = _np.clip(_np.zeros(7), _lo, _hi)
+            _q[_j] = float(_np.clip(center, _lo[_j], _hi[_j]))
+            _d = 0.01
+            _a2, _b2 = _q.copy(), _q.copy()
+            _a2[_j] -= _d; _b2[_j] += _d
+            mm_per_rad = float(_np.linalg.norm(
+                _arm.fk(_b2)[:3, 3] - _arm.fk(_a2)[:3, 3])) * 1e3 / (2 * _d)
+            results["meta"]["mm_per_rad"] = mm_per_rad
+            results["meta"]["max_speed_mm_s"] = args.max_speed
+            print(f"\n  손끝 감도 {mm_per_rad:.1f} mm/rad "
+                  f"({mm_per_rad*math.pi/180:.1f} mm/°)")
+            if args.max_speed > 0:
+                print(f"  속도 상한 {args.max_speed:.0f} mm/s → "
+                      f"0.5Hz 에서 최대 진폭 "
+                      f"±{math.degrees(args.max_speed/(2*math.pi*0.5*mm_per_rad)):.2f}°")
+        except Exception as e:
+            print(f"  손끝 감도 계산 실패: {e} — 속도 상한을 적용하지 못합니다.")
+
+        # PART A 도 상한을 지킨다 (0.5Hz 고정이라 보통 여유가 있다)
+        amp_a = amp
+        if mm_per_rad > 0 and args.max_speed > 0:
+            cap_a = args.max_speed / (2 * math.pi * 0.5 * mm_per_rad)
+            if cap_a < amp_a:
+                print(f"  PART A 진폭을 ±{math.degrees(amp_a):.2f}° → "
+                      f"±{math.degrees(cap_a):.2f}° 로 낮춥니다 (속도 상한)")
+                amp_a = cap_a
+
         rate_results: list[RateResult] = []
         # send-only 를 먼저 — 순수 명령 천장. 그다음 send+read 로 관측 가능성까지.
         # 나눠 재지 않으면 천장이 낮게 나왔을 때 명령 탓인지 조회 탓인지 모른다.
@@ -1078,7 +1153,7 @@ def main() -> int:
             print(f"{'target':>8} {'achieved':>9} {'p50':>8} {'p99':>8} {'p99.9':>8} "
                   f"{'max':>8} {'jitter':>7} {'state_hz':>9} {'ack':>7}")
             for hz in rates:
-                r = measure_rate(ad, hz, args.dwell, amp, center, do_read=do_read)
+                r = measure_rate(ad, hz, args.dwell, amp_a, center, do_read=do_read)
                 rate_results.append(r)
                 sh = "—" if math.isnan(r.state_hz) else f"{r.state_hz:.1f}"
                 ak = "—" if math.isnan(r.ack_frac) else f"{r.ack_frac*100:.1f}%"
@@ -1100,7 +1175,9 @@ def main() -> int:
         bode_results: list[BodePoint] = []
         if not args.skip_bode:
             print("\n── PART B — 스윕 사인 Bode " + "─" * 40)
-            bode_results = measure_bode(ad, bfreqs, amp, center)
+            bode_results = measure_bode(ad, bfreqs, amp, center,
+                                        mm_per_rad=mm_per_rad,
+                                        max_speed_mm_s=args.max_speed)
             results["bode"] = [asdict(p) for p in bode_results]
 
         replan: Optional[ReplanResult] = None
@@ -1122,7 +1199,7 @@ def main() -> int:
             for tapi, sf, label in variants:
                 print(f"\n   [{label}]")
                 ad.traj_api = tapi
-                r = measure_replan(ad, args.replan_trials, amp, center,
+                r = measure_replan(ad, args.replan_trials, amp_a, center,
                                    stop_first=sf)
                 if r is None:
                     print("   건너뜀 — 궤적 경로를 쓸 수 없습니다 (위 진단 참조).")
