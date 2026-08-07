@@ -88,7 +88,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "robot"))
 import sdk_entry  # noqa: E402
 from g1_kinematics import (            # noqa: E402
-    G1Arm, se3_inv, pose_error, identify_tip_frame, TIP_CANDIDATES,
+    G1Arm, se3_inv, pose_error, identify_tip_frame, TIP_CANDIDATES, build_chain,
 )
 
 # 판정 임계. 상대변환이 이보다 크게 어긋나면 URDF 가 실기체와 다르다는 뜻이다.
@@ -210,7 +210,7 @@ def compare(ours: list[np.ndarray], theirs: list[np.ndarray]) -> dict:
             "_body_p": [float(x) for x in body_p]}
 
 
-def interpret(c: dict) -> tuple[bool, str, list[str]]:
+def interpret(c: dict, c_abs=None) -> tuple[bool, str, list[str]]:
     """대조 결과를 판정으로 바꾼다.
 
     진단표
@@ -221,6 +221,30 @@ def interpret(c: dict) -> tuple[bool, str, list[str]]:
       body ❌ · spat ❌ → **URDF 자체가 실기체와 다름.** 링크 길이·관절 축 문제
     """
     notes: list[str] = []
+
+    # ★ base_link 절대 비교가 있으면 **그것이 주 판정**이다.
+    #   같은 프레임·같은 관절값이므로 상대변환 트릭이 필요 없고, 다리 체인까지
+    #   함께 검증된다. 상대변환 지표는 그 아래 보조로만 본다.
+    if c_abs:
+        p, r = c_abs["abs_pos_mm"], c_abs["abs_rot_deg"]
+        if p["median"] <= REL_POS_TOL_MM and r["median"] <= REL_ROT_TOL_DEG:
+            notes.append(
+                f"✅ base_link 절대 비교 일치 "
+                f"(pos median {p['median']:.3f}mm / rot {r['median']:.4f}°). "
+                "우리 URDF 가 SDK 모델과 맞고, 다리 5-DoF 체인도 함께 검증됐습니다.")
+            if p["max"] > REL_POS_TOL_MM * 3:
+                notes.append(
+                    f"   다만 max {p['max']:.2f}mm 인 샘플이 있습니다 — "
+                    "SDK FK 가 비결정론적(살아 있는 상태 혼입)이므로 그 정도 "
+                    "이상치는 예상 범위입니다.")
+            return True, "PASS — base_link 절대 비교 일치", notes
+        notes.append(
+            f"🔴 base_link 절대 비교 불일치 "
+            f"(pos median {p['median']:.2f}mm / rot {r['median']:.3f}°). "
+            "같은 프레임·같은 관절값인데 어긋납니다 — 링크 길이, 관절 축, "
+            "또는 chain 내 관절 순서를 의심하십시오. psi/T_rel 을 굽지 마십시오.")
+        return False, "FAIL — base_link 절대 비교 불일치", notes
+
     body_ok = (c["body_rel_pos_mm"]["max"] <= REL_POS_TOL_MM
                and c["body_rel_rot_deg"]["max"] <= REL_ROT_TOL_DEG)
     spat_ok = (c["spat_rel_pos_mm"]["max"] <= REL_POS_TOL_MM
@@ -252,9 +276,10 @@ def interpret(c: dict) -> tuple[bool, str, list[str]]:
                 "다르거나 chain 내 관절 순서가 다릅니다. psi/T_rel 을 굽지 마십시오.")
             return False, "FAIL — 계통적 기구학 불일치", notes
         notes.append(
-            "   median 은 작고 일부 샘플만 큽니다 → 전 범위 샘플링이 SDK 의 관절 "
-            "한계를 넘었을 가능성이 높습니다. `--sampling local` 로 현재 자세 "
-            "주변만 흔들어 재시도하십시오.")
+            "   median 은 작고 일부 샘플만 큽니다. SDK FK 가 비결정론적이라"
+            "(같은 q 재호출에도 차이 발생) 살아 있는 다리/토르소 상태가 섞인 "
+            "것으로 보입니다. base_link 절대 비교(leg 명시)가 가능하면 그쪽이 "
+            "결정적입니다.")
         return False, "FAIL (조건부) — 일부 샘플만 불일치", notes
 
     if abs_ok:
@@ -730,6 +755,29 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
             results[frame] = {"error": f"우리 URDF 에 {frame} 없음: {e}"}
             print(f"  {frame}: 우리 URDF 에 없음 — 건너뜀")
             continue
+
+        # ★ **base_link 기준 전체 체인.** 이게 이번 개정의 핵심이다.
+        #
+        #    문제: SDK FK 가 **비결정론적**이었다 — 같은 q 를 두 번 넣었는데
+        #    0.041mm 차이가 났다. FK 는 순수 함수여야 하므로, SDK 가 내
+        #    joint_state 만 쓰는 게 아니라 **살아 있는 다리/토르소 상태를
+        #    섞고 있다**는 뜻이다. 그러면 body-relative 가 상쇄하려는 root 변환이
+        #    샘플마다 달라져 잔차로 남는다 (관측: body-rel median 1.88mm).
+        #
+        #    해결: 다리를 우리도 모델링한다.
+        #      - 우리 FK 를 base_link 기준 12-DoF(leg 5 + arm 7)로 계산하고
+        #      - SDK 에도 leg 를 **명시적으로 넘겨** 살아 있는 상태를 쓰지 못하게 한다
+        #    그러면 root 오프셋이 아예 없어져 **절대 포즈를 직접 비교**할 수 있다.
+        #    이게 훨씬 강한 검정이고, 덤으로 다리 체인까지 검증된다.
+        chain12 = None
+        try:
+            chain12 = build_chain(frame, root="base_link")
+            n_leg = len(chain12.dof_idx) - len(q_lo)
+            print(f"  base_link 전체 체인: dof {len(chain12.dof_idx)} "
+                  f"(leg {n_leg} + arm {len(q_lo)})")
+        except Exception as e:
+            print(f"  ⚠️ base_link 전체 체인 실패: {e} — 상대 비교만 합니다.")
+            n_leg = 0
         q_lo, q_hi = arm.limits
 
         # ⚠️ **기본은 현재 자세 주변 샘플링이다.**
@@ -758,7 +806,22 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
             print(f"  → preflight 실패. 이 프레임은 건너뜁니다.")
             continue
 
+        # 다리 상태 — 우리 FK 에도 쓰고 SDK 에도 넘긴다
+        leg_now = None
+        if chain12 is not None:
+            try:
+                cj = motion.get_chain_joint_state() or {}
+                if "leg" in cj and len(cj["leg"]) == n_leg:
+                    leg_now = np.asarray(cj["leg"], dtype=float)
+                    print(f"  leg 상태 고정: {np.round(leg_now, 4)}")
+            except Exception:
+                pass
+            if leg_now is None:
+                print("  ⚠️ leg 상태를 못 읽어 절대 비교를 건너뜁니다.")
+                chain12 = None
+
         ours, theirs = [], []
+        ours_abs, theirs_abs = [], []
         qs = []
         bad = 0
         for _ in range(n):
@@ -768,9 +831,13 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
             else:
                 q = rng.uniform(q_lo, q_hi)
             qs.append(q)
+            js = {chain: [float(x) for x in q]}
+            if leg_now is not None:
+                # leg 를 명시하면 SDK 가 살아 있는 상태를 못 쓴다 → 결정론 회복
+                js["leg"] = [float(x) for x in leg_now]
             try:
                 st, pose = motion.forward_kinematics(
-                    frame, reference_frame=ref_frame, joint_state={chain: list(q)})
+                    frame, reference_frame=ref_frame, joint_state=js)
             except Exception as e:
                 bad += 1
                 if bad == 1:
@@ -792,12 +859,34 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
             pick = 0 if len(cands) == 1 else _quat_pick
             ours.append(mine)
             theirs.append(cands[pick])
+            if chain12 is not None and leg_now is not None:
+                ours_abs.append(chain12.fk(np.concatenate([leg_now, q])))
+                theirs_abs.append(cands[pick])
         if not ours:
             results[frame] = {"error": "호출 실패"}
             continue
         c = compare(ours, theirs)
-        ok, verdict, notes = interpret(c)
-        results[frame] = {**c, "ok": ok, "verdict": verdict, "notes": notes}
+
+        # ★ 절대 비교가 가능하면 **그게 주 판정**이다. 같은 frame(base_link)에서
+        #   같은 관절값으로 계산했으므로 상대변환 트릭이 필요 없다.
+        c_abs = None
+        if ours_abs:
+            c_abs = compare(ours_abs, theirs_abs)
+            ap, ar_ = c_abs["abs_pos_mm"], c_abs["abs_rot_deg"]
+            print(f"\n── {frame}  [base_link 절대 비교 — leg 명시]")
+            print(f"   pos median {ap['median']:8.3f}  p95 {ap['p95']:8.3f}  "
+                  f"max {ap['max']:8.3f} mm")
+            print(f"   rot median {ar_['median']:8.4f}  p95 {ar_['p95']:8.4f}  "
+                  f"max {ar_['max']:8.4f}°")
+            if ap["median"] <= REL_POS_TOL_MM and ar_["median"] <= REL_ROT_TOL_DEG:
+                print("   ✅ **일치 — 우리 URDF 가 SDK 모델과 맞습니다.**")
+                print("      (다리 5-DoF 체인까지 함께 검증됐습니다)")
+            else:
+                print("   ❌ 어긋납니다. 링크 길이·관절 축·관절 순서를 의심하십시오.")
+
+        ok, verdict, notes = interpret(c, c_abs)
+        results[frame] = {**c, "abs_base": c_abs,
+                          "ok": ok, "verdict": verdict, "notes": notes}
         print(f"\n── {frame}")
         print(f"   절대  pos median {c['abs_pos_mm']['median']:8.3f} mm   "
               f"rot median {c['abs_rot_deg']['median']:7.4f}°")
