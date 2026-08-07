@@ -475,6 +475,7 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
     try:
         robot, rhow = sdk_entry.acquire(sdk, "GalbotRobot")
         print(f"GalbotRobot 획득: {rhow}", flush=True)
+        _HANDLES["robot"] = robot
         print("GalbotRobot.init() 호출 중...", flush=True)
         rok = bool(robot.init(set()))
         print(f"GalbotRobot.init() → {rok}", flush=True)
@@ -495,6 +496,7 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
               file=sys.stderr)
         return 2
     print(f"GalbotMotion 획득: {how}", flush=True)
+    _HANDLES["motion"] = motion
     if no_init:
         print("--no-init: init() 을 건너뜁니다 (forward_kinematics 는 순수 계산)")
         inited = True
@@ -552,8 +554,13 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
         print("\n확인할 것:")
         print("  1. 로봇 전원이 켜져 있고 부팅이 끝났습니까?")
         print("  2. 이 PC 가 로봇 LAN 에 연결돼 있습니까? (ping 으로 확인)")
-        print("  3. 다른 프로세스가 이미 SDK 를 점유하고 있지 않습니까?")
-        print("     (SDK 는 싱글톤 구조라 중복 연결이 막힐 수 있습니다)")
+        print("  3. **이전 실행의 세션이 로봇에 남아 있지 않습니까?**")
+        print("     관측: 같은 로봇에서 처음엔 init()=True 였다가 그 뒤로 계속")
+        print("     False 다. 프로세스가 끝나도 유지되는 상태이므로 로봇 쪽에")
+        print("     세션이 남은 것으로 보입니다. 이제 종료 시 명시적으로")
+        print("     반납하지만, **이미 남은 세션은 아래로 정리하십시오**:")
+        print("       ps aux | grep -i galbot        # 우리 python 프로세스 잔류 확인")
+        print("       (남아 있으면 kill, 그래도 안 되면 로봇 소프트웨어 재시작)")
         print("\n⚠️ 여기서 멈춥니다. init 실패 상태에서 get_* 를 더 부르면")
         print("   segfault 로 프로세스가 죽고 지금까지의 출력도 날아갑니다.")
         return 2
@@ -806,6 +813,40 @@ def main() -> int:
                     args.sampling, args.amp)
 
 
+# 종료 시 반납할 핸들. 여러 경로에서 return 하므로 전역에 모아둔다.
+_HANDLES: dict = {"robot": None, "motion": None}
+
+
+def sdk_teardown(robot=None, motion=None) -> None:
+    """os._exit 전에 **세션을 명시적으로 반납한다.**
+
+    왜 필요한가 — 2026-07-31 관측
+    ─────────────────────────────
+    같은 로봇에서 motion.init() 이 처음엔 True 였다가 그 뒤로 계속 False 가 됐다.
+    프로세스가 끝나도 유지되는 상태이므로 **로봇 쪽에 세션이 남아 있다**는 뜻이다.
+
+    원인으로 의심되는 것이 내가 넣은 os._exit() 다. 인터프리터 종료 시 SDK 가
+    segfault 를 내서 그걸 우회했는데, 그러면 소멸자가 안 돌아 세션도 반납되지
+    않는다. 크래시를 피하려다 상태를 오염시킨 셈이다.
+
+    그래서 순서를 바꾼다: **명시적으로 반납하고 나서** os._exit 로 빠져나간다.
+    공식 문서의 종료 시퀀스가 request_shutdown → wait_for_shutdown → destroy 다.
+    각 호출은 개별 try 로 감싼다 — 하나가 실패해도 나머지는 시도해야 한다.
+    """
+    for obj, name in ((motion, "motion"), (robot, "robot")):
+        if obj is None:
+            continue
+        for m in ("request_shutdown", "wait_for_shutdown", "destroy"):
+            if not hasattr(obj, m):
+                continue
+            try:
+                getattr(obj, m)()
+                print(f"  [teardown] {name}.{m}() ok", flush=True)
+            except Exception as e:
+                print(f"  [teardown] {name}.{m}() → {type(e).__name__}: {e}",
+                      flush=True)
+
+
 def _hard_exit(code: int) -> None:
     """SDK 소멸자를 건너뛰고 종료한다.
 
@@ -815,6 +856,12 @@ def _hard_exit(code: int) -> None:
     결과는 이미 디스크에 있으므로, 버퍼만 비우고 os._exit 로 빠져나간다.
     이걸 안 하면 make 가 실패로 판단해 후속 타겟이 안 돈다.
     """
+    # ⚠️ 순서가 중요하다: **반납 먼저, 그다음 os._exit.**
+    #    반대로 하면 세션이 로봇에 남아 다음 실행의 init() 이 False 가 된다.
+    try:
+        sdk_teardown(_HANDLES.get("robot"), _HANDLES.get("motion"))
+    except Exception as e:
+        print(f"  [teardown] 실패: {type(e).__name__}: {e}")
     try:
         sys.stdout.flush()
         sys.stderr.flush()
@@ -825,3 +872,4 @@ def _hard_exit(code: int) -> None:
 
 if __name__ == "__main__":
     _hard_exit(main())
+

@@ -346,6 +346,7 @@ def probe_live(g: Any) -> dict:
     live["GalbotRobot_ctor"] = ctor
     if ctor.get("ok"):
         print(f"  ✅ {ctor['method']}", flush=True)
+    _HANDLES["robot"] = robot
     if robot is None:
         live["GalbotRobot"] = {"ok": False,
                                "error": ctor.get("diagnosis", "획득 실패")}
@@ -570,6 +571,7 @@ def probe_live(g: Any) -> dict:
         live["GalbotMotion_ctor"] = mctor
         if mctor.get("ok"):
             print(f"  ✅ {mctor['method']}", flush=True)
+        _HANDLES["motion"] = motion
         if motion is not None:
             # ⚠️ Motion 도 init() 이 필요하다. 안 하면 get_chain_joint_state() 가
             #    빈 dict 를 돌려준다 (온보드 실측). robot.init() 과 별개다.
@@ -917,6 +919,40 @@ def main() -> int:
     return 0
 
 
+# 종료 시 반납할 핸들. 여러 경로에서 return 하므로 전역에 모아둔다.
+_HANDLES: dict = {"robot": None, "motion": None}
+
+
+def sdk_teardown(robot=None, motion=None) -> None:
+    """os._exit 전에 **세션을 명시적으로 반납한다.**
+
+    왜 필요한가 — 2026-07-31 관측
+    ─────────────────────────────
+    같은 로봇에서 motion.init() 이 처음엔 True 였다가 그 뒤로 계속 False 가 됐다.
+    프로세스가 끝나도 유지되는 상태이므로 **로봇 쪽에 세션이 남아 있다**는 뜻이다.
+
+    원인으로 의심되는 것이 내가 넣은 os._exit() 다. 인터프리터 종료 시 SDK 가
+    segfault 를 내서 그걸 우회했는데, 그러면 소멸자가 안 돌아 세션도 반납되지
+    않는다. 크래시를 피하려다 상태를 오염시킨 셈이다.
+
+    그래서 순서를 바꾼다: **명시적으로 반납하고 나서** os._exit 로 빠져나간다.
+    공식 문서의 종료 시퀀스가 request_shutdown → wait_for_shutdown → destroy 다.
+    각 호출은 개별 try 로 감싼다 — 하나가 실패해도 나머지는 시도해야 한다.
+    """
+    for obj, name in ((motion, "motion"), (robot, "robot")):
+        if obj is None:
+            continue
+        for m in ("request_shutdown", "wait_for_shutdown", "destroy"):
+            if not hasattr(obj, m):
+                continue
+            try:
+                getattr(obj, m)()
+                print(f"  [teardown] {name}.{m}() ok", flush=True)
+            except Exception as e:
+                print(f"  [teardown] {name}.{m}() → {type(e).__name__}: {e}",
+                      flush=True)
+
+
 def _hard_exit(code: int) -> None:
     """SDK 소멸자를 건너뛰고 종료한다.
 
@@ -925,6 +961,12 @@ def _hard_exit(code: int) -> None:
     정적 소멸 순서 문제로 보이며 우리가 고칠 수 없다. 결과는 이미 디스크에
     있으므로 버퍼만 비우고 os._exit 로 빠져나간다.
     """
+    # ⚠️ 순서가 중요하다: **반납 먼저, 그다음 os._exit.**
+    #    반대로 하면 세션이 로봇에 남아 다음 실행의 init() 이 False 가 된다.
+    try:
+        sdk_teardown(_HANDLES.get("robot"), _HANDLES.get("motion"))
+    except Exception as e:
+        print(f"  [teardown] 실패: {type(e).__name__}: {e}")
     try:
         sys.stdout.flush()
         sys.stderr.flush()
