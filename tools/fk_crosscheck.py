@@ -885,7 +885,16 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
                 print("   ✅ **일치 — 우리 URDF 가 SDK 모델과 맞습니다.**")
                 print("      (다리 5-DoF 체인까지 함께 검증됐습니다)")
             else:
-                print("   ❌ 어긋납니다. 링크 길이·관절 축·관절 순서를 의심하십시오.")
+                print("   ❌ 어긋납니다. 원인을 특정합니다...")
+                try:
+                    dg = diagnose_mismatch(motion, frame, ref_frame, chain,
+                                           chain12, leg_now,
+                                           np.asarray(q_center if q_center is not None
+                                                      else (q_lo + q_hi) / 2,
+                                                      dtype=float), arm)
+                    results.setdefault("_diagnosis", {})[frame] = dg
+                except Exception as e:
+                    print(f"   진단 실패: {type(e).__name__}: {e}")
 
         ok, verdict, notes = interpret(c, c_abs)
         results[frame] = {**c, "abs_base": c_abs,
@@ -1095,6 +1104,123 @@ def self_test_live() -> int:
     print(f"❌ run_live 가 rc={rc} 를 반환했습니다. 배선이 깨졌습니다.")
     print("   가짜는 우리 URDF 로 FK 를 계산하므로 반드시 PASS 여야 합니다.")
     return 1
+
+
+def diagnose_mismatch(motion, frame, ref, chain, chain12, leg, q0, arm,
+                      delta=0.15):
+    """절대 비교가 어긋날 때 **원인을 특정한다.**
+
+    두 FK 가 base_link 기준으로 같은 관절값을 받았는데 다르다면 원인은 넷이다:
+      (a) 링크 길이   (b) 관절 축   (c) 관절 순서   (d) 고정 프레임 회전/캘리브레이션
+
+    구분 방법
+    ─────────
+    1. **상수 오프셋인가** — X_i = T_ours_i⁻¹ · T_sdk_i 를 샘플마다 구한다.
+       X 가 모든 샘플에서 같으면 **tip 프레임 정의 차이**일 뿐이고,
+       그 상수만 적용하면 우리 FK 가 맞는다 (가장 좋은 결과).
+       Y_i = T_sdk_i · T_ours_i⁻¹ 가 상수면 base 쪽 차이다.
+       둘 다 변하면 관절 수준의 차이다.
+
+    2. **어느 관절인가** — 관절 하나씩 ±delta 흔들어 EE 변위 벡터를 비교한다.
+       두 FK 가 같은 base_link 기준이므로 **벡터를 직접 비교**할 수 있다.
+         크기 비율 ≠ 1  → 그 관절 이후의 링크 길이가 다름
+         방향 각도 ≠ 0  → 그 관절의 축이 다름
+       관절 순서가 다르면 특정 관절에서 크게 튄다.
+    """
+    print("\n  ── 불일치 진단 ─────────────────────────────────────")
+
+    def sdk_T(q):
+        js = {chain: [float(x) for x in q], "leg": [float(x) for x in leg]}
+        st, pose = motion.forward_kinematics(frame, reference_frame=ref,
+                                             joint_state=js)
+        if getattr(st, "name", str(st)) != "SUCCESS":
+            return None
+        return quat_variants(pose)
+
+    def our_T(q):
+        return chain12.fk(np.concatenate([leg, q]))
+
+    # 쿼터니언 순서를 먼저 고정
+    c0 = sdk_T(q0)
+    if not c0:
+        print("     FK 호출 실패 — 진단 불가")
+        return {}
+    m0 = our_T(q0)
+    pick = int(np.argmin([pose_error(m0, T)[1] for T in c0])) if len(c0) > 1 else 0
+
+    # ── 1. 상수 오프셋 검정 ──────────────────────────────────────────────
+    lo, hi = arm.limits
+    rng = np.random.default_rng(7)
+    Xs, Ys = [], []
+    for _ in range(12):
+        q = np.clip(q0 + rng.uniform(-delta, delta, size=len(q0)), lo, hi)
+        c = sdk_T(q)
+        if not c:
+            continue
+        A, B = our_T(q), c[pick]
+        Xs.append(se3_inv(A) @ B)
+        Ys.append(B @ se3_inv(A))
+
+    def spread(Ms):
+        if len(Ms) < 2:
+            return float("nan"), float("nan")
+        dp = [pose_error(Ms[0], M)[0] * 1e3 for M in Ms[1:]]
+        dr = [math.degrees(pose_error(Ms[0], M)[1]) for M in Ms[1:]]
+        return float(np.max(dp)), float(np.max(dr))
+
+    xp, xr = spread(Xs)
+    yp, yr = spread(Ys)
+    print(f"     상수 오프셋 검정 (n={len(Xs)})")
+    print(f"       tip 쪽  X = T_ours⁻¹·T_sdk   산포 {xp:7.3f} mm / {xr:6.3f}°")
+    print(f"       base 쪽 Y = T_sdk·T_ours⁻¹   산포 {yp:7.3f} mm / {yr:6.3f}°")
+    verdict = None
+    if xp < 0.5 and xr < 0.1:
+        t = Xs[0]
+        print(f"       ✅ **X 가 상수다 → tip 프레임 정의 차이일 뿐이다.**")
+        print(f"          오프셋: 병진 {np.round(t[:3,3]*1e3,3)} mm")
+        print(f"          이 상수만 적용하면 우리 FK 가 SDK 와 일치합니다.")
+        verdict = "constant_tip_offset"
+    elif yp < 0.5 and yr < 0.1:
+        print(f"       ✅ Y 가 상수다 → base 프레임 정의 차이입니다.")
+        verdict = "constant_base_offset"
+    else:
+        print(f"       ❌ 둘 다 자세에 따라 변합니다 → **관절 수준의 차이**입니다.")
+        verdict = "joint_level"
+
+    # ── 2. 관절별 감도 ───────────────────────────────────────────────────
+    print(f"\n     관절별 감도 (각 관절 ±{delta:.2f} rad, base_link 기준 변위 벡터)")
+    print(f"       {'관절':>6} {'우리(mm)':>10} {'SDK(mm)':>10} {'비율':>7} {'방향차':>8}")
+    per_joint = {}
+    for j in range(len(q0)):
+        qa, qb = q0.copy(), q0.copy()
+        qa[j] = float(np.clip(q0[j] - delta, lo[j], hi[j]))
+        qb[j] = float(np.clip(q0[j] + delta, lo[j], hi[j]))
+        ca, cb = sdk_T(qa), sdk_T(qb)
+        if not ca or not cb:
+            continue
+        v_our = our_T(qb)[:3, 3] - our_T(qa)[:3, 3]
+        v_sdk = cb[pick][:3, 3] - ca[pick][:3, 3]
+        n_our, n_sdk = np.linalg.norm(v_our), np.linalg.norm(v_sdk)
+        ratio = n_sdk / n_our if n_our > 1e-9 else float("nan")
+        ang = math.degrees(math.acos(np.clip(
+            float(v_our @ v_sdk) / (n_our * n_sdk + 1e-12), -1, 1))) \
+            if n_our > 1e-9 and n_sdk > 1e-9 else float("nan")
+        mark = "  " if (abs(ratio - 1) < 0.01 and ang < 1.0) else " ←"
+        print(f"       j{j+1:<5} {n_our*1e3:10.2f} {n_sdk*1e3:10.2f} "
+              f"{ratio:7.4f} {ang:7.3f}°{mark}")
+        per_joint[f"j{j+1}"] = {"ours_mm": n_our * 1e3, "sdk_mm": n_sdk * 1e3,
+                                "ratio": ratio, "angle_deg": ang}
+
+    bad = [k for k, v in per_joint.items()
+           if not (abs(v["ratio"] - 1) < 0.01 and v["angle_deg"] < 1.0)]
+    print(f"\n     어긋나는 관절: {bad or '(없음)'}")
+    if bad:
+        print("       비율이 다르면 그 관절 **이후 링크 길이**,")
+        print("       방향이 다르면 그 관절의 **축** 이 다릅니다.")
+        print("       특정 관절만 크게 튀면 **관절 순서**를 의심하십시오.")
+    return {"offset_verdict": verdict, "X_spread_mm": xp, "X_spread_deg": xr,
+            "Y_spread_mm": yp, "Y_spread_deg": yr, "per_joint": per_joint,
+            "bad_joints": bad}
 
 
 def sdk_teardown(robot=None, motion=None) -> None:
