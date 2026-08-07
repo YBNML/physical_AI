@@ -472,6 +472,8 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
     #    만들었고 15초 내내 {} 였으며 forward_kinematics 가 DATA_FETCH_FAILED 로
     #    실패했다. 두 실행의 유일한 차이가 이것이다 — 메시지 버스 구독이
     #    robot 핸들 쪽에 있는 것으로 보인다.
+    sdk_entry.report_other_clients("read")
+
     try:
         robot, rhow = sdk_entry.acquire(sdk, "GalbotRobot")
         print(f"GalbotRobot 획득: {rhow}", flush=True)
@@ -685,13 +687,21 @@ def run_live(n: int, side: str, ref_frame: str, out: str,
         print("\n  🔴 SDK 링크 목록이 비어 있습니다 — **기구학 모델이 로드되지**")
         print("     **않았습니다.** motion.init() 이 실제로 실패한 상태입니다.")
         print("     (get_supported_chains 는 정적 설정이라 이 경우에도 응답합니다)")
-        print("\n  복구:")
-        print("     1) ps aux | grep -i galbot | grep python   ← 우리 잔류 프로세스")
-        print("        남아 있으면 kill 하십시오.")
-        print("     2) 그래도 안 되면 로봇 소프트웨어를 재시작해야 합니다.")
-        print("     3) probe-live 는 성공했었습니다 — 그때는 robot.init() 뒤")
-        print("        get_* 를 수십 번 부르며 시간이 흘렀습니다. 시간 문제라면")
-        print("        재실행으로 풀릴 수 있습니다.")
+        others = sdk_entry.find_other_sdk_clients()
+        if others:
+            print("\n  **원인이 확인됐습니다: 다른 클라이언트가 SDK 를 점유 중입니다.**")
+            for o in others:
+                print(f"     pid {o['pid']}: {o['cmdline'][:140]}")
+            print("\n     GalbotRobot.init() 은 성공하는데 GalbotMotion.init() 만")
+            print("     실패합니다 → **Motion 은 배타적**이고 Robot 은 다중 접근을")
+            print("     허용하는 것으로 보입니다.")
+            print("\n     ⚠️ 저 프로세스를 kill 하지 마십시오 — 다른 사람의 작업입니다.")
+            print("     상대 작업이 끝난 뒤 다시 실행하십시오.")
+        else:
+            print("\n  다른 클라이언트는 안 보입니다. 그렇다면:")
+            print("     1) 우리 이전 실행의 세션이 남았을 수 있습니다 (재부팅/재시작)")
+            print("     2) root 로 도는 클라이언트는 /proc 접근이 막혀 안 보일 수 있습니다")
+            print("        sudo ps aux | grep -i galbot   으로 확인하십시오")
         return 2
     if not present:
         print("\n  🔴 시도할 프레임이 없습니다. SDK 의 팔 관련 링크 목록:")

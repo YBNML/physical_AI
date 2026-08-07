@@ -140,11 +140,12 @@ class G1Adapter:
 
     def __init__(self, dry_run: bool = False, joint_name: str = "left_arm_joint4",
                  tau_s: float = 0.015, horizon_s: float = 0.0,
-                 send_api: str = "commands"):
+                 send_api: str = "commands", allow_shared: bool = False):
         self.dry_run = dry_run
         self.joint_name = joint_name
         self.horizon_s = horizon_s          # time_from_start_s
         self.send_api = send_api            # "commands" | "positions"
+        self.allow_shared = allow_shared
         # PART C 경로. batch = 공식 문서의 "multiple future frames" = chunk 경로.
         self.traj_api = "trajectory"        # "trajectory" | "batch"
         self._robot = None
@@ -187,6 +188,19 @@ class G1Adapter:
             )
         self._sdk = sdk
         print(f"[adapter] galbot_sdk {getattr(sdk, '__file__', '?')}")
+
+        # 🔴 **안전 차단.** 이 도구는 팔을 실제로 움직인다. 다른 클라이언트가
+        #    동시에 로봇을 제어 중이면 명령원이 둘이 되어 예측할 수 없는 동작이
+        #    난다. 2026-07-31 온보드에서 open_bridge 클라이언트가 132% CPU 로
+        #    돌고 있는 것을 실제로 발견했다 (다른 사람의 작업이었다).
+        others = sdk_entry.report_other_clients("move")
+        if others and not self.allow_shared:
+            sys.exit(
+                "\n[adapter] 🔴 중단합니다 — 다른 SDK 클라이언트가 동작 중입니다.\n"
+                "  이 측정은 실기체를 움직이므로 명령원이 둘이 되면 위험합니다.\n"
+                "  상대 작업이 끝난 뒤 실행하십시오.\n"
+                "  (그 프로세스가 로봇을 제어하지 않음을 **직접 확인**했다면\n"
+                "   --allow-shared 로 강제할 수 있지만, 권장하지 않습니다.)")
 
         # ⚠️ GalbotRobot() 직접 생성은 실패할 수 있다 — pybind11 이 py::init<>()
         #    없이 바인딩한 클래스는 "No constructor defined!" 가 난다 (GalbotMotion
@@ -919,6 +933,8 @@ def main() -> int:
                     choices=["onboard", "external", "unspecified"],
                     help="측정 위치 (결과에 기록됨)")
     ap.add_argument("--joint", default="left_arm_joint4")
+    ap.add_argument("--allow-shared", action="store_true",
+                    help="다른 SDK 클라이언트가 있어도 강제 실행 (위험 — 권장 안 함)")
     ap.add_argument("--send-api", default="commands",
                     choices=["commands", "positions"],
                     help="경로 A 에 쓸 API. commands=set_joint_commands "
@@ -970,7 +986,8 @@ def main() -> int:
     print()
 
     ad = G1Adapter(dry_run=args.dry_run, joint_name=args.joint,
-                   horizon_s=args.horizon_s, send_api=args.send_api)
+                   horizon_s=args.horizon_s, send_api=args.send_api,
+                   allow_shared=args.allow_shared)
     ad.prime()
     results = {
         "meta": {

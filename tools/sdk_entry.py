@@ -545,3 +545,90 @@ def entry_report(sdk: Any, emit=None) -> str:
 
 if __name__ == "__main__":
     raise SystemExit(self_test())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 다른 SDK 클라이언트 탐지 — 2026-07-31 온보드에서 필요해졌다
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# 관측: motion.init() 이 계속 False 였는데, 원인은 우리 세션 잔류가 아니라
+#       **다른 프로세스가 SDK 를 점유**하고 있었기 때문이다.
+#
+#           galbot_g1_client.py --server ws://... --id galbot_g1_no2
+#           LD_LIBRARY_PATH=/data/galbot/lib     ← 우리와 같은 SDK
+#           CPU 132%                              ← 활발히 동작 중
+#
+#       GalbotRobot.init() 은 성공하는데 GalbotMotion.init() 만 실패한다.
+#       즉 **Motion 은 배타적**이고 Robot 은 다중 접근을 허용하는 것으로 보인다.
+#
+# 왜 이게 안전 문제인가
+# ─────────────────────
+# GATE-1 은 팔을 실제로 움직인다. 다른 클라이언트가 동시에 로봇을 제어 중이면
+# **명령원이 둘**이 되어 예측할 수 없는 움직임이 난다. 읽기 전용 도구는
+# 경고만 하면 되지만, 움직이는 도구는 **막아야 한다.**
+
+_CLIENT_MARKERS = ("galbot_g1_client", "open_bridge", "galbot_sdk",
+                   "/data/galbot/lib")
+
+
+def find_other_sdk_clients(exclude_self: bool = True) -> list:
+    """이 기계에서 SDK 를 쓰는 **다른** 프로세스를 찾는다.
+
+    /proc 를 읽는다 (Linux 전용, 실패해도 조용히 빈 목록). 같은 사용자의
+    프로세스만 읽히므로 root 데몬은 안 보일 수 있다 — 그건 한계로 인정한다.
+    """
+    out = []
+    me = os.getpid()
+    proc = "/proc"
+    if not os.path.isdir(proc):
+        return out
+    for pid in os.listdir(proc):
+        if not pid.isdigit():
+            continue
+        p = int(pid)
+        if exclude_self and p in (me, os.getppid()):
+            continue
+        try:
+            with open(f"{proc}/{pid}/cmdline", "rb") as f:
+                cmd = f.read().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+        except Exception:
+            continue
+        if not cmd:
+            continue
+        # 우리 자신의 도구는 제외
+        if "tools/probe_sdk.py" in cmd or "tools/fk_crosscheck.py" in cmd \
+                or "tools/measure_loop_rate.py" in cmd:
+            continue
+        hay = cmd
+        try:
+            with open(f"{proc}/{pid}/environ", "rb") as f:
+                hay += " " + f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+        except Exception:
+            pass
+        if any(m in hay for m in _CLIENT_MARKERS):
+            out.append({"pid": p, "cmdline": cmd[:200]})
+    return out
+
+
+def report_other_clients(purpose: str = "read") -> list:
+    """탐지 결과를 출력한다. purpose='move' 면 위험을 강하게 알린다.
+
+    반환: 발견된 클라이언트 목록 (호출자가 차단 여부를 결정한다)
+    """
+    others = find_other_sdk_clients()
+    if not others:
+        print("  [sdk] 다른 SDK 클라이언트 없음 ✅", flush=True)
+        return others
+    print("\n  ⚠️ **다른 프로세스가 SDK 를 쓰고 있습니다:**", flush=True)
+    for o in others:
+        print(f"     pid {o['pid']}: {o['cmdline'][:150]}", flush=True)
+    if purpose == "move":
+        print("\n  🔴 이 도구는 **로봇을 실제로 움직입니다.** 명령원이 둘이 되면")
+        print("     예측할 수 없는 동작이 발생합니다. 상대 작업이 끝난 뒤 실행하십시오.")
+    else:
+        print("\n  ℹ️ 읽기 전용이라 위험하지는 않지만, **GalbotMotion 은 배타적**이라")
+        print("     motion.init() 이 실패할 수 있습니다 (실측). 그 경우 상대 작업이")
+        print("     끝나야 FK 대조가 가능합니다.")
+    print("     ⚠️ 이 프로세스를 임의로 kill 하지 마십시오 — 다른 사람의 작업입니다.",
+          flush=True)
+    return others
